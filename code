@@ -1,6 +1,6 @@
 // api/offers.js
 export default async function handler(req, res) {
-  const SOURCE = "https://script.google.com/macros/s/XXXXXXXX/exec?type=offers"; // <-- замени на свой Apps Script URL
+  const SOURCE = "https://script.google.com/u/0/home/projects/14eZIMtTZ-IzMqfNw4d81zS8qxAthsy6SyOTSWcd0CSU67Q5dfeZVbCI1/exec?type=offers"; // 
   try {
     const r = await fetch(SOURCE, { method: 'GET' });
     const xml = await r.text();
