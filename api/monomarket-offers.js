@@ -1,4 +1,3 @@
-// api/monomarket-offers.js
 const { readSheets } = require('../lib/sheetsClient');
 const { getDrive, findFileByName, readFileContent, uploadOrUpdateFile } = require('../lib/driveClient');
 const { buildControlMap, buildOffersXml } = require('../lib/feedBuilder');
