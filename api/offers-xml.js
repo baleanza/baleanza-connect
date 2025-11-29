@@ -164,8 +164,7 @@ function buildOffersXml(importValues, controlMap) {
       "<" + ROOT_TAG + ">",
       "  <offers/>",
       "</" + ROOT_TAG + ">"
-    ].join("
-");
+].join("\n");
   }
 
   const headers = importValues[0];
