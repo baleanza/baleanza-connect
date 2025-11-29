@@ -265,9 +265,9 @@ function buildOffersXml(importValues, controlMap) {
       if (valStr === "") return;
 
       paramLines.push(
-        "        <param name="" +
+        "        <param name=\"" +
           escapeXml(paramNameDefault) +
-          "">" +
+          "\">" +
           escapeXml(valStr) +
           "</param>"
       );
