@@ -313,8 +313,11 @@ function buildOffersXml(importValues, controlMap) {
 
   return xml.join("\n");
 }
+               
+let cachedXml = null;
+let cachedAt = 0;
+const CACHE_TTL_MS = 3 * 60 * 60 * 1000; // 3 години
 
-let cachedXml = null; let cachedAt = 0; const CACHE_TTL_MS = 3 * 60 * 60 * 1000; // 3 години
 
 module.exports = async (req, res) => {
 if (req.method !== "GET") {
