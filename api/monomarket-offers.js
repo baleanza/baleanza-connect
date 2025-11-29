@@ -1,359 +1,177 @@
-const { google } = require("googleapis");
+import { google } from 'googleapis';
+import { getSheetsClient } from '../lib/sheetsClient.js';
+import { getDriveClient } from '../lib/driveClient.js';
+import { buildOffersXml } from '../lib/feedBuilder.js';
 
-const IMPORT_SHEET_NAME = "Import";
-const CONTROL_SHEET_NAME = "Feed Control List";
+const CACHE_TTL_SECONDS = parseInt(process.env.CACHE_TTL_SECONDS || '7200', 10);
+const DRIVE_FILE_NAME = 'monomarket-offers.xml';
 
-const CORE_TAGS = [
-  "id",
-  "code",
-  "vendor_code",
-  "title",
-  "barcode",
-  "category",
-  "category_id",
-  "brand",
-  "availability",
-  "weight",
-  "height",
-  "width",
-  "length",
-  "description"
-];
-
-const IMAGE_PREFIX = "image_";
-const ROOT_TAG = "Market";
-
-function escapeXml(value) {
-  if (value === null || value === undefined) return "";
-  return String(value)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
+function requireEnv(varName) {
+  const value = process.env[varName];
+  if (!value) {
+    console.error(`Missing required env var: ${varName}`);
+  }
+  return value;
 }
 
-function convertToCm(value, units) {
-  if (value === null || value === undefined) return "";
+function checkApiKey(req) {
+  const apiKey = process.env.API_KEY;
+  if (!apiKey) return true;
+  const headerKey = req.headers['x-api-key'];
+  return headerKey && headerKey === apiKey;
+}
 
-  const str = String(value).replace(/,/g, ".").trim();
-  let num = parseFloat(str);
-  if (isNaN(num)) {
-    return value;
+async function ensureAuth() {
+  const keyJson = requireEnv('GOOGLE_SERVICE_ACCOUNT_KEY');
+  const spreadsheetId = requireEnv('SPREADSHEET_ID');
+  if (!keyJson || !spreadsheetId) {
+    throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY or SPREADSHEET_ID not configured');
   }
 
-  const u = (units || "").toString().toLowerCase().trim();
-
-  if (u === "мм" || u === "mm") {
-    num = num / 10;
-  } else if (u === "см" || u === "cm") {
-    // already cm
-  } else if (u === "м" || u === "m") {
-    num = num * 100;
+  let keyObj;
+  try {
+    keyObj = JSON.parse(keyJson);
+  } catch (e) {
+    console.error('Failed to parse GOOGLE_SERVICE_ACCOUNT_KEY JSON', e);
+    throw e;
   }
 
-  num = Math.round(num * 100) / 100;
-  return num.toString();
+  const jwtClient = new google.auth.JWT(
+    keyObj.client_email,
+    null,
+    keyObj.private_key,
+    [
+      'https://www.googleapis.com/auth/spreadsheets.readonly',
+      'https://www.googleapis.com/auth/drive.file'
+    ]
+  );
+
+  await jwtClient.authorize();
+
+  const sheets = getSheetsClient(jwtClient);
+  const drive = getDriveClient(jwtClient);
+
+  return { sheets, drive, spreadsheetId };
 }
 
-function isBooleanLike(val) {
-  if (val === true || val === false) return true;
-  const s = String(val).trim().toLowerCase();
-  if (s === "true" || s === "false" || s === "1" || s === "0") return true;
-  if (s === "так" || s === "ні" || s === "так" || s === "ні") return true;
-  return false;
-}
+async function getOrCreateDriveFile(drive) {
+  const res = await drive.files.list({
+    q: `name='${DRIVE_FILE_NAME}' and trashed = false`,
+    fields: 'files(id, name, modifiedTime)',
+    spaces: 'drive'
+  });
 
-function booleanToUa(val) {
-  if (val === true) return "Так";
-  if (val === false) return "Ні";
-
-  const s = String(val).trim().toLowerCase();
-  if (s === "true" || s === "1" || s === "так" || s === "так") return "Так";
-  if (s === "false" || s === "0" || s === "ні" || s === "ні") return "Ні";
-
-  return "";
-}
-
-function processTagParamValue(paramName, value, units) {
-  if (value === null || value === undefined) return [];
-
-  if (String(value).trim().toLowerCase() === "cellimage") return [];
-
-  const result = [];
-
-  if (isBooleanLike(value)) {
-    const s = booleanToUa(value);
-    if (s !== "") result.push(s);
-    return result;
+  const files = res.data.files || [];
+  if (files.length > 0) {
+    return files[0];
   }
 
-  let valStr = String(value).trim();
-  if (valStr === "") return [];
+  const createRes = await drive.files.create({
+    requestBody: {
+      name: DRIVE_FILE_NAME,
+      mimeType: 'application/xml'
+    }
+  });
 
-  if (units) {
-    valStr = valStr + " " + String(units).trim();
-  }
-
-  if (paramName === "Особливості") {
-    const parts = valStr.split(",");
-    parts.forEach((p) => {
-      const t = p.trim();
-      if (t !== "") result.push(t);
-    });
-    return result;
-  }
-
-  result.push(valStr);
-  return result;
+  return createRes.data;
 }
 
-async function getSheetsClient() {
-  const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-  const key = (process.env.GOOGLE_SERVICE_ACCOUNT_KEY || "").replace(/\n/g, "\n");
-  const scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"];
-
-  const auth = new google.auth.JWT(email, null, key, scopes);
-  await auth.authorize();
-  return google.sheets({ version: "v4", auth });
+async function readDriveFileContent(drive, fileId) {
+  const res = await drive.files.get(
+    {
+      fileId,
+      alt: 'media'
+    },
+    { responseType: 'arraybuffer' }
+  );
+  return Buffer.from(res.data).toString('utf-8');
 }
 
-async function getSheetValues(sheets, spreadsheetId, range) {
-  const res = await sheets.spreadsheets.values.get({
+async function writeDriveFileContent(drive, fileId, xml) {
+  await drive.files.update({
+    fileId,
+    media: {
+      mimeType: 'application/xml',
+      body: xml
+    }
+  });
+}
+
+async function readSheetData(sheets, spreadsheetId) {
+  const importRes = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range
+    range: 'Import!A1:ZZ',
   });
-  return res.data.values || [];
+
+  const controlRes = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: 'Feed Control List!A1:D',
+  });
+
+  const importValues = importRes.data.values || [];
+  const controlValues = controlRes.data.values || [];
+
+  return { importValues, controlValues };
 }
 
-function buildControlMap(values) {
-  const map = {};
-  for (let i = 1; i < values.length; i++) {
-    const row = values[i] || [];
-    const importField = row[0];
-    const flag = row[1];
-    const feedName = row[2];
-    const tagName = row[3];
-    const valSpec = row[4];
-    const units = row[5];
-
-    if (!importField) continue;
-
-    const enabled =
-      flag === true ||
-      String(flag).toLowerCase() === "true" ||
-      String(flag) === "1";
-
-    const xmlName = feedName ? String(feedName).trim() : String(importField).trim();
-
-    map[String(importField).trim()] = {
-      enabled,
-      xmlName,
-      tagName: tagName ? String(tagName).trim() : "",
-      units: units ? String(units).trim() : "",
-      rawValues: valSpec
-    };
-  }
-  return map;
+function isFresh(modifiedTime) {
+  if (!modifiedTime) return false;
+  const modified = new Date(modifiedTime).getTime();
+  const now = Date.now();
+  return now - modified < CACHE_TTL_SECONDS * 1000;
 }
 
-function buildOffersXml(importValues, controlMap) {
-  if (importValues.length < 2) {
-    return [
-      "<?xml version='1.0' encoding='UTF-8'?>",
-      "<" + ROOT_TAG + ">",
-      "  <offers/>",
-      "</" + ROOT_TAG + ">"
-].join("\n");
+export default async function handler(req, res) {
+  if (req.method !== 'GET') {
+    res.status(405).send('Method Not Allowed');
+    return;
   }
 
-  const headers = importValues[0];
-  const rows = importValues.slice(1);
+  if (!checkApiKey(req)) {
+    res.status(401).send('Unauthorized');
+    return;
+  }
 
-  const xml = [];
-  xml.push("<?xml version='1.0' encoding='UTF-8'?>");
-  xml.push("<" + ROOT_TAG + ">");
-  xml.push("  <offers>");
+  try {
+    const { sheets, drive, spreadsheetId } = await ensureAuth();
 
-  rows.forEach((row) => {
-    if (!row || row.join("") === "") return;
+    const fileMeta = await getOrCreateDriveFile(drive);
 
-    const offerLines = [];
-    let codeLine = "";
-    let titleLine = "";
-    const pictureLines = [];
-    const paramLines = [];
+    if (fileMeta.id && isFresh(fileMeta.modifiedTime)) {
+      try {
+        const xml = await readDriveFileContent(drive, fileMeta.id);
 
-    headers.forEach((header, colIndex) => {
-      if (!header) return;
-
-      const value = row[colIndex];
-      if (value === "" || value === null || value === undefined) return;
-
-      const headerStr = String(header).trim();
-      const control = controlMap[headerStr];
-      if (!control || !control.enabled) return;
-
-      const xmlName = control.xmlName;
-      const tagName = control.tagName;
-      const units = control.units;
-
-      if (CORE_TAGS.indexOf(xmlName) !== -1) {
-        let coreValue = value;
-
-        if (xmlName === "description") {
-          offerLines.push(
-            "      <description><![CDATA[" +
-              String(coreValue) +
-              "]]></description>"
-          );
-          return;
-        }
-
-        if (xmlName === "height" || xmlName === "width" || xmlName === "length") {
-          coreValue = convertToCm(coreValue, units);
-        }
-        if (xmlName === "weight") {
-          coreValue = String(coreValue).replace(/,/g, ".");
-        }
-        
-        if (xmlName === "code") {
-          codeLine = "      <code>" + escapeXml(coreValue) + "</code>";
-          return;
-        }
-
-        if (xmlName === "title") {
-          titleLine = "      <title>" + escapeXml(coreValue) + "</title>";
-          return;
-        }
-
-        offerLines.push(
-          "      <" + xmlName + ">" + escapeXml(coreValue) + "</" + xmlName + ">"
+        res.setHeader('Content-Type', "application/xml; charset=utf-8");
+        res.setHeader(
+          'Cache-Control',
+          `public, s-maxage=${CACHE_TTL_SECONDS}, max-age=0`
         );
+        res.status(200).send(xml);
         return;
+      } catch (e) {
+        console.error('Failed to read cached XML from Drive, will regenerate', e);
       }
+    }
 
-      if (xmlName.indexOf(IMAGE_PREFIX) === 0) {
-        pictureLines.push("        <picture>" + escapeXml(value) + "</picture>");
-        return;
+    const { importValues, controlValues } = await readSheetData(sheets, spreadsheetId);
+    const xml = buildOffersXml(importValues, controlValues);
+
+    if (fileMeta.id) {
+      try {
+        await writeDriveFileContent(drive, fileMeta.id, xml);
+      } catch (e) {
+        console.error('Failed to write XML to Drive', e);
       }
+    }
 
-      if (xmlName === "tags") {
-        const paramName =
-          tagName && String(tagName).trim() ? String(tagName).trim() : headerStr;
-
-        const processed = processTagParamValue(paramName, value, units);
-        if (!processed || processed.length === 0) return;
-
-        processed.forEach((item) => {
-          paramLines.push(
-            "        <param name=\"" +
-            escapeXml(paramName) +
-      "\">" +
-      escapeXml(item) +
-      "</param>"
-  );
-        });
-
-        return;
-      }
-
-  const paramNameDefault = xmlName;
-  let valStr = String(value).trim();
-
-  if (units) {
-    valStr = valStr.replace(/,/g, ".");
-    valStr = valStr + " " + String(units).trim();
+    res.setHeader('Content-Type', "application/xml; charset=utf-8");
+    res.setHeader(
+      'Cache-Control',
+      `public, s-maxage=${CACHE_TTL_SECONDS}, max-age=0`
+    );
+    res.status(200).send(xml);
+  } catch (err) {
+    console.error('Error in /api/monomarket-offers', err);
+    res.status(502).send('Bad Gateway');
   }
-
-  if (valStr === "") return;
-
-  paramLines.push(
-    "        <param name=\"" +
-      escapeXml(paramNameDefault) +
-      "\">" +
-      escapeXml(valStr) +
-      "</param>"
-  );
-
-
-    if (
-      !codeLine &&
-      !titleLine &&
-      offerLines.length === 0 &&
-      pictureLines.length === 0 &&
-      paramLines.length === 0
-    ) {
-      return;
-    }
-
-    xml.push("    <offer>");
-    if (codeLine) xml.push(codeLine);
-    if (titleLine) xml.push(titleLine);
-
-    offerLines.forEach((line) => xml.push(line));
-
-    if (pictureLines.length > 0) {
-      xml.push("      <image_link>");
-      pictureLines.forEach((line) => xml.push(line));
-      xml.push("      </image_link>");
-    }
-
-    if (paramLines.length > 0) {
-      xml.push("      <tags>");
-      paramLines.forEach((line) => xml.push(line));
-      xml.push("      </tags>");
-    }
-
-    xml.push("    </offer>");
-  });
-
-  xml.push("  </offers>");
-  xml.push("</" + ROOT_TAG + ">");
-
-  return xml.join("\n");
 }
-               
-let cachedXml = null;
-let cachedAt = 0;
-const CACHE_TTL_MS = 3 * 60 * 60 * 1000; // 3 години
-
-
-module.exports = async (req, res) => {
-if (req.method !== "GET") {
-res.status(405).send("Method Not Allowed");
-return;
-}
-const now = Date.now();
-if (cachedXml && now - cachedAt < CACHE_TTL_MS) {
-res.setHeader("Content-Type", "application/xml; charset=utf-8");
-res.status(200).send(cachedXml);
-return;
-}
-try {
-const spreadsheetId = process.env.SPREADSHEET_ID;
-const sheets = await getSheetsClient();
-const importValues = await getSheetValues(
-  sheets,
-  spreadsheetId,
-  "'" + IMPORT_SHEET_NAME + "'"
-);
-const controlValues = await getSheetValues(
-  sheets,
-  spreadsheetId,
-  "'" + CONTROL_SHEET_NAME + "'"
-);
-
-const controlMap = buildControlMap(controlValues);
-const xml = buildOffersXml(importValues, controlMap);
-
-cachedXml = xml;
-cachedAt = now;
-
-res.setHeader("Content-Type", "application/xml; charset=utf-8");
-res.status(200).send(xml);
-} catch (err) {
-console.error(err);
-res.status(500).send("Internal Server Error");
-}
-};
