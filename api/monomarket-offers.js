@@ -255,14 +255,9 @@ function buildOffersXml(importValues, controlMap) {
         return;
       }
 
-      const paramNameDefault = xmlName;
-      let valStr = String(value).replace(/,/g, ".");
-
-      if (units) {
-        valStr = valStr + " " + String(units).trim();
-      }
-
-      if (valStr === "") return;
+     const paramNameDefault = xmlName; let valStr = String(value);
+if (units) { valStr = valStr.replace(/,/g, "."); valStr = valStr + " " + String(units).trim(); }
+if (valStr === "") return;
 
       paramLines.push(
         "        <param name=\"" +
