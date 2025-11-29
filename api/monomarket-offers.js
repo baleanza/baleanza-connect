@@ -262,7 +262,6 @@ function buildOffersXml(importValues, controlMap) {
   let valStr = String(value).trim();
 
   if (units) {
-    // только если есть единицы измерения, меняем запятую на точку
     valStr = valStr.replace(/,/g, ".");
     valStr = valStr + " " + String(units).trim();
   }
