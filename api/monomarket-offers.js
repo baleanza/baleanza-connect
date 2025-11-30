@@ -1,3 +1,4 @@
+// Vercel serverless handler (CommonJS)
 const { readSheets } = require('../lib/sheetsClient');
 const { getDrive, findFileByName, readFileContent, uploadOrUpdateFile } = require('../lib/driveClient');
 const { buildControlMap, buildOffersXml } = require('../lib/feedBuilder');
@@ -15,18 +16,20 @@ module.exports = async (req, res) => {
     // optional API key protection
     const API_KEY = process.env.API_KEY;
     if (API_KEY) {
-      const key = req.headers['x-api-key'] || req.query.api_key;
+      const key = (req.headers['x-api-key'] || req.query.api_key || '').toString();
       if (key !== API_KEY) return res.status(401).send('Unauthorized');
     }
 
-    // env checks
-    requireEnv('GOOGLE_SERVICE_ACCOUNT_KEY');
+    // basic env checks
+    requireEnv('GOOGLE_SERVICE_ACCOUNT_EMAIL');
+    requireEnv('GOOGLE_PRIVATE_KEY');
     requireEnv('SPREADSHEET_ID');
 
     const drive = await getDrive();
-    const existing = await findFileByName(drive, FILE_NAME);
 
+    const existing = await findFileByName(drive, FILE_NAME);
     const now = Date.now();
+
     if (existing && existing.modifiedTime) {
       const modified = new Date(existing.modifiedTime).getTime();
       if ((now - modified) / 1000 < DEFAULT_TTL) {
@@ -49,7 +52,7 @@ module.exports = async (req, res) => {
     res.setHeader('Cache-Control', `public, s-maxage=${DEFAULT_TTL}, max-age=0`);
     return res.status(200).send(xml);
   } catch (err) {
-    console.error('feed error', err);
+    console.error('feed error', err && err.stack ? err.stack : err);
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     return res.status(502).send('Bad Gateway');
   }
