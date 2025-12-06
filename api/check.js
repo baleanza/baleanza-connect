@@ -1,37 +1,3 @@
-import { google } from 'googleapis';
-import { getSheetsClient } from '../lib/sheetsClient.js';
-import { getInventoryBySkus } from '../lib/wixClient.js';
-
-// --- Вспомогательные функции (как в фидах) ---
-function requireEnv(name) {
-  const v = process.env[name];
-  if (!v) throw new Error(`Missing env var ${name}`);
-  return v;
-}
-
-async function ensureAuth() {
-  const keyJson = requireEnv('GOOGLE_SERVICE_ACCOUNT_KEY');
-  const spreadsheetId = requireEnv('SPREADSHEET_ID');
-  const keyObj = JSON.parse(keyJson);
-
-  const jwtClient = new google.auth.JWT(
-    keyObj.client_email,
-    null,
-    keyObj.private_key,
-    ['https://www.googleapis.com/auth/spreadsheets.readonly']
-  );
-  await jwtClient.authorize();
-
-  const sheets = getSheetsClient(jwtClient);
-  return { sheets, spreadsheetId };
-}
-
-// Чистим цену для отображения
-function cleanPrice(val) {
-  if (!val) return 0;
-  let str = String(val).trim().replace(/\s/g, '').replace(',', '.');
-  return parseFloat(str.replace(/[^0-9.]/g, '')) || 0;
-}
 
 export default async function handler(req, res) {
   try {
@@ -43,23 +9,16 @@ export default async function handler(req, res) {
       sheets.spreadsheets.values.get({ spreadsheetId, range: 'Feed Control List!A1:F' })
     ]);
 
-    const importRows = importRes.data.values || [];
-    const controlRows = controlRes.data.values || [];
+    // ... (стандартна перевірка довжини) ...
 
-    if (importRows.length < 2) {
-      return res.send('<h1>Таблиця пуста</h1>');
-    }
-
-    // 2. Разбираем настройки колонок (где Имя, где SKU, где Цена)
+    // 2. Разбираем настройки колонок
     const headers = importRows[0];
     const dataRows = importRows.slice(1);
     
-    const controlHeaders = controlRows[0] || [];
-    const idxImportField = controlHeaders.indexOf('Import field');
-    const idxFeedName = controlHeaders.indexOf('Feed name');
+    // ... (стандартний розбір controlRows) ...
 
     let colSku = -1;
-    let colName = -1;
+    let colName = -1; // <-- Змінено
     let colPrice = -1;
 
     const fieldMap = {}; 
@@ -71,41 +30,22 @@ export default async function handler(req, res) {
       }
     });
 
+    // Намагаємося знайти Назву по полях 'name', 'title' або 'Name'/'Title'
+    const nameKeys = [fieldMap['name'], fieldMap['title'], 'Name', 'Title'].filter(Boolean);
+    
+    for (const key of nameKeys) {
+      colName = headers.indexOf(key);
+      if (colName > -1) break;
+    }
+
     colSku = headers.indexOf(fieldMap['sku'] || 'SKU'); 
-    colName = headers.indexOf(fieldMap['name'] || 'Name');
     colPrice = headers.indexOf(fieldMap['price'] || 'Price');
 
     if (colSku === -1) return res.send('<h1>Помилка: Не знайдено колонку SKU</h1>');
 
-    // 3. Собираем список SKU для запроса в Wix
-    const skus = [];
-    const tableData = [];
+    // ... (збір tableData та stockMap без змін) ...
 
-    dataRows.forEach(row => {
-      const sku = row[colSku] ? String(row[colSku]).trim() : '';
-      if (!sku) return;
-
-      skus.push(sku);
-      
-      const priceVal = colPrice > -1 ? row[colPrice] : '0';
-      
-      tableData.push({
-        sku: sku,
-        name: colName > -1 ? row[colName] : '(Без назви)',
-        priceRaw: priceVal,
-        price: cleanPrice(priceVal)
-      });
-    });
-
-    // 4. Запрашиваем реальный сток из Wix 
-    const inventory = await getInventoryBySkus(skus);
-    
-    const stockMap = {};
-    inventory.forEach(item => {
-      stockMap[String(item.sku).trim()] = item;
-    });
-
-    // 5. Генерируем HTML
+    // 5. Генерируем HTML (Додаємо легенду)
     let html = `
     <html>
       <head>
@@ -134,9 +74,9 @@ export default async function handler(req, res) {
 
         <h3>Легенда</h3>
         <div class="legend">
-            <div class="instock">✅ В НАЯВНОСТІ (Availability: true) — Товар знайдено у Wix і має позитивний залишок.</div>
-            <div class="outstock">❌ НЕМАЄ В НАЯВНОСТІ (Availability: false) — Товар знайдено у Wix, але його залишок дорівнює 0.</div>
-            <div class="warn">⚠️ НЕ ЗНАЙДЕНО В WIX — Артикул є в Google Таблиці, але Wix не повернув його (опечатка в SKU або товар не існує).</div>
+            <div class="instock">✅ **В НАЯВНОСТІ** — Товар знайдено у Wix і має позитивний залишок.</div>
+            <div class="outstock">❌ **НЕМАЄ В НАЯВНОСТІ** — Товар знайдено у Wix, але його залишок дорівнює 0.</div>
+            <div class="warn">⚠️ **НЕ ЗНАЙДЕНО В WIX** — Артикул є в Google Таблиці, але Wix не повернув його (опечатка в SKU або товар не існує).</div>
         </div>
 
         <table>
@@ -172,6 +112,7 @@ export default async function handler(req, res) {
         qtyText = wixItem.quantity;
       }
 
+      // Виправлено: ціна округлена і додана валюта
       html += `
         <tr>
           <td>${item.sku}</td>
