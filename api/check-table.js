@@ -47,15 +47,13 @@ export default async function handler(req, res) {
     const controlRows = controlRes.data.values || [];
 
     if (importRows.length < 2) {
-      return res.send('<h1>Таблица пуста</h1>');
+      return res.send('<h1>Таблиця пуста</h1>');
     }
 
     // 2. Разбираем настройки колонок (где Имя, где SKU, где Цена)
     const headers = importRows[0];
     const dataRows = importRows.slice(1);
     
-    // Ищем индексы колонок в Feed Control List
-    // Нам нужны поля, у которых "Feed name" равно: sku, name, price
     const controlHeaders = controlRows[0] || [];
     const idxImportField = controlHeaders.indexOf('Import field');
     const idxFeedName = controlHeaders.indexOf('Feed name');
@@ -64,7 +62,6 @@ export default async function handler(req, res) {
     let colName = -1;
     let colPrice = -1;
 
-    // Карта: "Имя в фиде" -> "Имя колонки в Import"
     const fieldMap = {}; 
     controlRows.slice(1).forEach(row => {
       const imp = row[idxImportField];
@@ -74,12 +71,11 @@ export default async function handler(req, res) {
       }
     });
 
-    // Теперь ищем индексы в заголовках Import
-    colSku = headers.indexOf(fieldMap['sku'] || 'SKU'); // Фоллбек на 'SKU'
+    colSku = headers.indexOf(fieldMap['sku'] || 'SKU'); 
     colName = headers.indexOf(fieldMap['name'] || 'Name');
     colPrice = headers.indexOf(fieldMap['price'] || 'Price');
 
-    if (colSku === -1) return res.send('<h1>Ошибка: Не найдена колонка SKU</h1>');
+    if (colSku === -1) return res.send('<h1>Помилка: Не знайдено колонку SKU</h1>');
 
     // 3. Собираем список SKU для запроса в Wix
     const skus = [];
@@ -95,17 +91,15 @@ export default async function handler(req, res) {
       
       tableData.push({
         sku: sku,
-        name: colName > -1 ? row[colName] : '(No Name)',
+        name: colName > -1 ? row[colName] : '(Без назви)',
         priceRaw: priceVal,
         price: cleanPrice(priceVal)
       });
     });
 
-    // 4. Запрашиваем реальный сток из Wix (используем нашу новую мощную функцию)
-    // Это может занять пару секунд
+    // 4. Запрашиваем реальный сток из Wix 
     const inventory = await getInventoryBySkus(skus);
     
-    // Превращаем массив стока в удобную карту: SKU -> Info
     const stockMap = {};
     inventory.forEach(item => {
       stockMap[String(item.sku).trim()] = item;
@@ -115,10 +109,11 @@ export default async function handler(req, res) {
     let html = `
     <html>
       <head>
-        <title>Stock Check</title>
+        <title>Перевірка залишків</title>
+        <meta charset="UTF-8">
         <style>
           body { font-family: sans-serif; padding: 20px; }
-          table { border-collapse: collapse; width: 100%; max-width: 1000px; }
+          table { border-collapse: collapse; width: 100%; max-width: 1200px; margin-top: 15px; }
           th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
           th { background-color: #f2f2f2; }
           .instock { background-color: #d4edda; color: #155724; font-weight: bold; }
@@ -126,22 +121,32 @@ export default async function handler(req, res) {
           .warn { background-color: #fff3cd; color: #856404; }
           h2 { margin-bottom: 5px; }
           .summary { margin-bottom: 20px; font-size: 14px; color: #666; }
+          .legend div { margin-bottom: 5px; padding: 5px; border-radius: 4px; }
         </style>
       </head>
       <body>
-        <h2>Проверка товаров и стока</h2>
+        <h2>Перевірка товарів та залишків</h2>
+        
         <div class="summary">
-          Всего товаров в таблице: ${tableData.length} <br>
-          Найдено в Wix: ${inventory.length}
+          Усього товарів у таблиці: ${tableData.length} <br>
+          Зібрано залишків з Wix: ${inventory.length}
         </div>
+
+        <h3>Легенда</h3>
+        <div class="legend">
+            <div class="instock">✅ В НАЯВНОСТІ (Availability: true) — Товар знайдено у Wix і має позитивний залишок.</div>
+            <div class="outstock">❌ НЕМАЄ В НАЯВНОСТІ (Availability: false) — Товар знайдено у Wix, але його залишок дорівнює 0.</div>
+            <div class="warn">⚠️ НЕ ЗНАЙДЕНО В WIX — Артикул є в Google Таблиці, але Wix не повернув його (опечатка в SKU або товар не існує).</div>
+        </div>
+
         <table>
           <thead>
             <tr>
               <th>Артикул (SKU)</th>
-              <th>Название</th>
-              <th>Цена (Sheet)</th>
-              <th>Наличие (Wix)</th>
-              <th>Кол-во (Wix)</th>
+              <th>Назва</th>
+              <th>Ціна (Sheet)</th>
+              <th>Наявність (Wix)</th>
+              <th>К-сть (Wix)</th>
             </tr>
           </thead>
           <tbody>
@@ -155,15 +160,15 @@ export default async function handler(req, res) {
       let qtyText = '-';
 
       if (!wixItem) {
-        stockClass = 'warn'; // Желтый
-        stockText = 'Не найден в Wix';
+        stockClass = 'warn'; 
+        stockText = 'Не знайдено в Wix';
       } else if (wixItem.inStock) {
-        stockClass = 'instock'; // Зеленый
-        stockText = 'В НАЛИЧИИ';
+        stockClass = 'instock'; 
+        stockText = 'В НАЯВНОСТІ';
         qtyText = wixItem.quantity;
       } else {
-        stockClass = 'outstock'; // Красный
-        stockText = 'Нет в наличии';
+        stockClass = 'outstock'; 
+        stockText = 'Немає в наявності';
         qtyText = wixItem.quantity;
       }
 
@@ -171,7 +176,7 @@ export default async function handler(req, res) {
         <tr>
           <td>${item.sku}</td>
           <td>${item.name}</td>
-          <td>${item.price}</td>
+          <td>${item.price.toFixed(2)} ₴</td>
           <td class="${stockClass}">${stockText}</td>
           <td>${qtyText}</td>
         </tr>
@@ -189,6 +194,6 @@ export default async function handler(req, res) {
     res.status(200).send(html);
 
   } catch (e) {
-    res.status(500).send(`<h1>Error</h1><pre>${e.message}\n${e.stack}</pre>`);
+    res.status(500).send(`<h1>Помилка</h1><pre>${e.message}\n${e.stack}</pre>`);
   }
 }
