@@ -5,14 +5,12 @@ export default async function handler(req, res) {
   const token = process.env.WIX_ACCESS_TOKEN;
   const siteId = process.env.WIX_SITE_ID;
 
-  if (!token || !siteId) {
-    return res.status(500).json({ error: 'Missing WIX_ACCESS_TOKEN or WIX_SITE_ID' });
-  }
-
+  if (!token || !siteId) return res.status(500).json({ error: 'Configs missing' });
   if (!sku) return res.status(400).json({ error: 'Provide ?sku=...' });
 
   try {
-    // Используем Products V1 API
+    // Делаем простой запрос без фильтров, но с лимитом 100,
+    // чтобы посмотреть, какие вообще товары приходят
     const response = await fetch('https://www.wixapis.com/stores/v1/products/query', {
       method: 'POST',
       headers: {
@@ -22,38 +20,33 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         query: {
-          filter: { "sku": { "$in": [sku] } }
+          limit: 100,
+          skip: 0
         }
       })
     });
 
-    const text = await response.text();
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch (e) {
-      data = { error: "Failed to parse JSON", raw: text };
-    }
-
+    const data = await response.json();
     const products = data.products || [];
-    const product = products[0];
+
+    // Ищем наш SKU вручную в полученном списке
+    const foundProduct = products.find(p => p.sku === sku || (p.variants && p.variants.some(v => v.sku === sku)));
 
     res.status(200).json({
-      method: "stores/v1/products/query",
+      method: "Fetch ALL & Filter in Memory",
       status_code: response.status,
-      site_id_used: siteId,
-      found_count: products.length,
+      total_products_in_first_page: products.length,
       
-      // Показываем данные, которые мы будем использовать для фида
-      stock_info: product ? {
-        name: product.name,
-        main_sku: product.sku,
-        inStock: product.inStock,
-        quantity: product.quantity,
-        variants_count: product.variants ? product.variants.length : 0
-      } : "Product Not Found",
+      // Нашли ли мы товар?
+      search_result: foundProduct ? {
+        name: foundProduct.name,
+        sku: foundProduct.sku,
+        inStock: foundProduct.inStock,
+        quantity: foundProduct.quantity
+      } : "Not found in first 100 items (if you have more, real feed will find it)",
 
-      full_response: data
+      // Пример первого товара (чтобы видеть структуру)
+      sample_product: products[0]
     });
 
   } catch (e) {
