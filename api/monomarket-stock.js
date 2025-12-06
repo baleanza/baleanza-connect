@@ -1,11 +1,11 @@
-// api/monomarket-stock.js (Оновлений файл)
+// api/monomarket-stock.js
 import { google } from 'googleapis';
 import { getInventoryBySkus } from '../lib/wixClient.js';
 import { buildStockJson } from '../lib/stockFeedBuilder.js'; 
-// ІМПОРТ ВИПРАВЛЕНО: тепер ensureAuth приходить з sheetsClient
+// ІМПОРТ ВИПРАВЛЕНО
 import { ensureAuth, requireEnv } from '../lib/sheetsClient.js'; 
 
-const CACHE_TTL_SECONDS = 300; // 5 хвилин
+const CACHE_TTL_SECONDS = 300; 
 
 function checkApiKey(req) {
   const apiKey = requireEnv('API_KEY');
@@ -15,19 +15,16 @@ function checkApiKey(req) {
 }
 
 async function readSheetData(sheets, spreadsheetId) {
-  // Читаємо основні дані
   const importRes = await sheets.spreadsheets.values.get({
     spreadsheetId,
     range: 'Import!A1:ZZ'
   });
 
-  // Читаємо настройки полів
   const controlRes = await sheets.spreadsheets.values.get({
     spreadsheetId,
     range: 'Feed Control List!A1:F'
   });
 
-  // Читаємо настройки доставки
   const deliveryRes = await sheets.spreadsheets.values.get({
     spreadsheetId,
     range: 'Delivery!A1:C'
@@ -58,10 +55,8 @@ export default async function handler(req, res) {
       spreadsheetId
     );
 
-    // Строим JSON фид
     const jsonOutput = await buildStockJson(importValues, controlValues, deliveryValues, getInventoryBySkus);
 
-    // Отдаем как JSON
     res.setHeader('Content-Type', "application/json; charset=utf-8");
     res.setHeader('Cache-Control', `public, s-maxage=${CACHE_TTL_SECONDS}, max-age=0`);
     res.status(200).send(jsonOutput);
