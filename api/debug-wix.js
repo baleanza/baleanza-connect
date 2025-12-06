@@ -12,8 +12,8 @@ export default async function handler(req, res) {
   if (!sku) return res.status(400).json({ error: 'Provide ?sku=...' });
 
   try {
-    // Тестируем V2 Inventory (совместимый с Catalog V1)
-    const response = await fetch('https://www.wixapis.com/stores/v2/inventoryItems/query', {
+    // Используем Products V1 API
+    const response = await fetch('https://www.wixapis.com/stores/v1/products/query', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,
@@ -22,9 +22,7 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         query: {
-          filter: { 
-            "sku": { "$in": [sku] } 
-          }
+          filter: { "sku": { "$in": [sku] } }
         }
       })
     });
@@ -37,12 +35,24 @@ export default async function handler(req, res) {
       data = { error: "Failed to parse JSON", raw: text };
     }
 
+    const products = data.products || [];
+    const product = products[0];
+
     res.status(200).json({
-      method: "v2/inventoryItems/query", // Показываем, что используем V2
+      method: "stores/v1/products/query",
       status_code: response.status,
       site_id_used: siteId,
-      found_count: data.inventoryItems ? data.inventoryItems.length : 0,
-      first_item: data.inventoryItems ? data.inventoryItems[0] : "Not found",
+      found_count: products.length,
+      
+      // Показываем данные, которые мы будем использовать для фида
+      stock_info: product ? {
+        name: product.name,
+        main_sku: product.sku,
+        inStock: product.inStock,
+        quantity: product.quantity,
+        variants_count: product.variants ? product.variants.length : 0
+      } : "Product Not Found",
+
       full_response: data
     });
 
