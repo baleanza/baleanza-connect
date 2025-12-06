@@ -8,7 +8,6 @@
     
     { "src": "/check", "dest": "/api/check.js" }, 
     
-    // Решта API
     { "src": "/api/monomarket-offers", "dest": "/api/monomarket-offers.js" },
     { "src": "/api/monomarket-stock", "dest": "/api/monomarket-stock.js" },
     { "src": "/api/murkit-webhook", "dest": "/api/murkit-webhook.js" },
