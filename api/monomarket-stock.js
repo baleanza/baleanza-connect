@@ -1,8 +1,7 @@
 import { google } from 'googleapis';
-import { getSheetsClient } from '../../lib/sheetsClient.js';
-import { getInventoryBySkus } from '../../lib/wixClient.js';
-// ВНИМАНИЕ: Импортируем buildStockJson, а не XML
-import { buildStockJson } from '../../lib/stockFeedBuilder.js';
+import { getSheetsClient } from '../lib/sheetsClient.js';
+import { getInventoryBySkus } from '../lib/wixClient.js';
+import { buildStockJson } from '../lib/stockFeedBuilder.js';
 
 const CACHE_TTL_SECONDS = 300; // 5 минут кеша
 
@@ -50,7 +49,6 @@ async function readSheetData(sheets, spreadsheetId) {
   });
 
   // 3. Читаем настройки доставки (Delivery)
-  // Ожидаем колонки: shipping_method, is_active, price
   const deliveryRes = await sheets.spreadsheets.values.get({
     spreadsheetId,
     range: 'Delivery!A1:C'
