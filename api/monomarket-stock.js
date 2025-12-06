@@ -1,9 +1,10 @@
 import { google } from 'googleapis';
 import { getSheetsClient } from '../../lib/sheetsClient.js';
 import { getInventoryBySkus } from '../../lib/wixClient.js';
-import { buildStockJson } from '../../lib/stockFeedBuilder.js'; // Заменили XML на JSON builder
+// ВНИМАНИЕ: Импортируем buildStockJson, а не XML
+import { buildStockJson } from '../../lib/stockFeedBuilder.js';
 
-const CACHE_TTL_SECONDS = 300; // 5 минут
+const CACHE_TTL_SECONDS = 300; // 5 минут кеша
 
 function requireEnv(name) {
   const v = process.env[name];
@@ -36,19 +37,19 @@ async function ensureAuth() {
 }
 
 async function readSheetData(sheets, spreadsheetId) {
-  // Читаем основные данные
+  // 1. Читаем товары (Import)
   const importRes = await sheets.spreadsheets.values.get({
     spreadsheetId,
     range: 'Import!A1:ZZ'
   });
 
-  // Читаем настройки полей
+  // 2. Читаем настройки полей (Feed Control List)
   const controlRes = await sheets.spreadsheets.values.get({
     spreadsheetId,
     range: 'Feed Control List!A1:F'
   });
 
-  // Читаем настройки доставки (Новое)
+  // 3. Читаем настройки доставки (Delivery)
   // Ожидаем колонки: shipping_method, is_active, price
   const deliveryRes = await sheets.spreadsheets.values.get({
     spreadsheetId,
@@ -80,16 +81,16 @@ export default async function handler(req, res) {
       spreadsheetId
     );
 
-    // Строим JSON фид
+    // Генерируем JSON
     const jsonOutput = await buildStockJson(importValues, controlValues, deliveryValues, getInventoryBySkus);
 
-    // Отдаем как JSON
     res.setHeader('Content-Type', "application/json; charset=utf-8");
     res.setHeader('Cache-Control', `public, s-maxage=${CACHE_TTL_SECONDS}, max-age=0`);
     res.status(200).send(jsonOutput);
     
   } catch (e) {
     console.error('Error in /api/monomarket-stock', e);
-    res.status(502).json({ error: 'Bad Gateway' });
+    // Возвращаем JSON с ошибкой
+    res.status(502).json({ error: 'Bad Gateway', details: e.message });
   }
 }
