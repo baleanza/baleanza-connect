@@ -23,7 +23,7 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         query: {
           filter: { 
-            "sku": { "$in": [sku] } 
+            "product.variantSku": { "$in": [sku] } 
           }
         }
       })
