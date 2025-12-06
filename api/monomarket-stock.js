@@ -1,54 +1,33 @@
+// api/monomarket-stock.js (Оновлений файл)
 import { google } from 'googleapis';
-import { getSheetsClient } from '../lib/sheetsClient.js';
 import { getInventoryBySkus } from '../lib/wixClient.js';
-import { buildStockJson } from '../lib/stockFeedBuilder.js';
+import { buildStockJson } from '../lib/stockFeedBuilder.js'; 
+// ІМПОРТ ВИПРАВЛЕНО: тепер ensureAuth приходить з sheetsClient
+import { ensureAuth, requireEnv } from '../lib/sheetsClient.js'; 
 
-const CACHE_TTL_SECONDS = 300; // 5 минут кеша
-
-function requireEnv(name) {
-  const v = process.env[name];
-  if (!v) throw new Error(`Missing env var ${name}`);
-  return v;
-}
+const CACHE_TTL_SECONDS = 300; // 5 хвилин
 
 function checkApiKey(req) {
-  const apiKey = process.env.API_KEY;
+  const apiKey = requireEnv('API_KEY');
   if (!apiKey) return true;
   const headerKey = req.headers['x-api-key'];
   return headerKey && headerKey === apiKey;
 }
 
-async function ensureAuth() {
-  const keyJson = requireEnv('GOOGLE_SERVICE_ACCOUNT_KEY');
-  const spreadsheetId = requireEnv('SPREADSHEET_ID');
-  const keyObj = JSON.parse(keyJson);
-
-  const jwtClient = new google.auth.JWT(
-    keyObj.client_email,
-    null,
-    keyObj.private_key,
-    ['https://www.googleapis.com/auth/spreadsheets.readonly']
-  );
-  await jwtClient.authorize();
-
-  const sheets = getSheetsClient(jwtClient);
-  return { sheets, spreadsheetId };
-}
-
 async function readSheetData(sheets, spreadsheetId) {
-  // 1. Читаем товары (Import)
+  // Читаємо основні дані
   const importRes = await sheets.spreadsheets.values.get({
     spreadsheetId,
     range: 'Import!A1:ZZ'
   });
 
-  // 2. Читаем настройки полей (Feed Control List)
+  // Читаємо настройки полів
   const controlRes = await sheets.spreadsheets.values.get({
     spreadsheetId,
     range: 'Feed Control List!A1:F'
   });
 
-  // 3. Читаем настройки доставки (Delivery)
+  // Читаємо настройки доставки
   const deliveryRes = await sheets.spreadsheets.values.get({
     spreadsheetId,
     range: 'Delivery!A1:C'
@@ -79,16 +58,16 @@ export default async function handler(req, res) {
       spreadsheetId
     );
 
-    // Генерируем JSON
+    // Строим JSON фид
     const jsonOutput = await buildStockJson(importValues, controlValues, deliveryValues, getInventoryBySkus);
 
+    // Отдаем как JSON
     res.setHeader('Content-Type', "application/json; charset=utf-8");
     res.setHeader('Cache-Control', `public, s-maxage=${CACHE_TTL_SECONDS}, max-age=0`);
     res.status(200).send(jsonOutput);
     
   } catch (e) {
     console.error('Error in /api/monomarket-stock', e);
-    // Возвращаем JSON с ошибкой
     res.status(502).json({ error: 'Bad Gateway', details: e.message });
   }
 }
