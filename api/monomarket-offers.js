@@ -2,7 +2,7 @@ import { google } from 'googleapis';
 import { getSheetsClient } from '../lib/sheetsClient.js';
 import { getDriveClient } from '../lib/driveClient.js';
 import { buildOffersXml } from '../lib/feedBuilder.js';
-import { getInventoryBySkus } from '../lib/wixClient.js'; // Добавлен импорт Wix клиента
+import { getInventoryBySkus } from '../lib/wixClient.js';
 
 const CACHE_TTL_SECONDS = parseInt(process.env.CACHE_TTL_SECONDS || '7200', 10);
 const DRIVE_FILE_NAME = 'monomarket-offers.xml';
@@ -16,12 +16,6 @@ function requireEnv(varName) {
   return value;
 }
 
-function checkApiKey(req) {
-  const apiKey = process.env.API_KEY;
-  if (!apiKey) return true;
-  const headerKey = req.headers['x-api-key'];
-  return headerKey && headerKey === apiKey;
-}
 
 async function ensureAuth() {
   const keyJson = requireEnv('GOOGLE_SERVICE_ACCOUNT_KEY');
@@ -64,7 +58,6 @@ async function getOrCreateDriveFile(drive) {
   const res = await drive.files.list({
     q: [
       `name='${DRIVE_FILE_NAME}'`,
-      // Используем папку общего доступа, как в старой версии
       `'${SHARED_DRIVE_FOLDER_ID}' in parents`, 
       'trashed = false'
     ].join(' and '),
@@ -151,7 +144,6 @@ async function getInventory(importValues, controlValues) {
         }
     });
 
-    // 2. Находим индекс колонки SKU
     const skuSheetHeader = fieldMapping['sku'] || 'SKU';
     const skuHeaderIndex = headers.indexOf(skuSheetHeader);
     
@@ -160,7 +152,6 @@ async function getInventory(importValues, controlValues) {
         return { inventoryMap: {} };
     }
 
-    // 3. Собираем уникальные SKU
     const skus = [];
     rows.forEach(row => {
         const sku = row[skuHeaderIndex] ? String(row[skuHeaderIndex]).trim() : '';
@@ -169,10 +160,8 @@ async function getInventory(importValues, controlValues) {
 
     const uniqueSkus = [...new Set(skus)];
 
-    // 4. Запрашиваем остатки
     const inventory = await getInventoryBySkus(uniqueSkus);
     
-    // 5. Создаем карту SKU -> Inventory Item
     const inventoryMap = {};
     inventory.forEach(item => {
         inventoryMap[String(item.sku).trim()] = item;
@@ -188,10 +177,7 @@ export default async function handler(req, res) {
     return;
   }
 
-  if (!checkApiKey(req)) {
-    res.status(401).send('Unauthorized');
-    return;
-  }
+
 
   try {
     const { sheets, drive, spreadsheetId } = await ensureAuth();
@@ -213,7 +199,7 @@ export default async function handler(req, res) {
         console.error('Failed to read cached XML from Drive, will regenerate', e);
       }
     }
-    
+  
     const { importValues, controlValues, deliveryValues } = await readSheetData(
       sheets,
       spreadsheetId
