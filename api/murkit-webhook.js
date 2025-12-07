@@ -119,14 +119,11 @@ export default async function handler(req, res) {
             throw new Error(`Product with SKU '${targetSku}' (Murkit Code: ${item.code}) not found in Wix.`);
         }
 
-        // Вот здесь мы берем ID из Wix (ответ на ваш вопрос №1)
         let catalogItemId = productMatch.id; 
-        
         let variantId = null;
         let stockData = productMatch.stock;
         let productName = productMatch.name;
 
-        // Variant check
         if (String(productMatch.sku) !== targetSku && productMatch.variants) {
             const variantMatch = productMatch.variants.find(v => String(v.variant?.sku) === targetSku);
             if (variantMatch) {
@@ -135,7 +132,6 @@ export default async function handler(req, res) {
             }
         }
 
-        // Stock Check
         if (stockData.trackQuantity && (stockData.quantity < requestedQty)) {
              throw new Error(`Insufficient stock for SKU '${targetSku}'. Requested: ${requestedQty}, Available: ${stockData.quantity}`);
         }
@@ -154,41 +150,21 @@ export default async function handler(req, res) {
         lineItems.push({
             quantity: requestedQty,
             catalogReference: catalogRef,
-            productName: {
-                original: productName 
-            },
-            itemType: {
-                preset: "PHYSICAL"
-            },
-            physicalProperties: {
-                sku: targetSku,
-                shippable: true
-            },
-            price: {
-                amount: fmtPrice(item.price)
-            },
-            taxDetails: {
-                taxRate: "0",
-                totalTax: { amount: "0.00", currency: currency }
-            }
+            productName: { original: productName },
+            itemType: { preset: "PHYSICAL" },
+            physicalProperties: { sku: targetSku, shippable: true },
+            price: { amount: fmtPrice(item.price) },
+            taxDetails: { taxRate: "0", totalTax: { amount: "0.00", currency: currency } }
         });
     }
 
-    // 5. Order Data
+    // 5. Order Data Preparation
     const clientName = getFullName(murkitData.client?.name);
     const recipientName = getFullName(murkitData.recipient?.name);
     const phone = String(murkitData.client?.phone || murkitData.recipient?.phone || "").replace(/\D/g,'');
-    
-    // ИЗМЕНЕНИЕ: Новый дефолтный email
     const email = murkitData.client?.email || "monomarket@mywoodmood.com";
 
     const deliveryTitle = `${murkitData.deliveryType || 'Delivery'} (${murkitData.delivery?.settlementName || ''})`;
-    const shippingAddress = {
-        country: "UA",
-        city: String(murkitData.delivery?.settlementName || "City"),
-        addressLine: `Nova Poshta: ${murkitData.delivery?.warehouseNumber || '1'}`,
-        postalCode: "00000"
-    };
 
     const priceSummary = {
         subtotal: { amount: fmtPrice(murkitData.sum), currency },
@@ -196,6 +172,59 @@ export default async function handler(req, res) {
         tax: { amount: "0.00", currency },
         discount: { amount: "0.00", currency },
         total: { amount: fmtPrice(murkitData.sum), currency }
+    };
+
+    // === ЛОГИКА ДОСТАВКИ И EXTENDED FIELDS ===
+    
+    const deliveryType = String(murkitData.deliveryType || '');
+    const npWarehouse = String(murkitData.delivery?.warehouseNumber || '').trim();
+    const npCity = String(murkitData.delivery?.settlementName || '').trim();
+    // Полный адрес для курьера (улица, дом, кв)
+    const npStreet = String(murkitData.delivery?.address || '').trim();
+
+    let extendedFields = {};
+    let finalAddressLine = "невідома адреса";
+
+    const typesForPostomat = ['nova-post:branch', 'nova-post:cargo_branch', 'nova-post:postomat'];
+
+    if (typesForPostomat.includes(deliveryType)) {
+        // === ОТДЕЛЕНИЕ / ПОЧТОМАТ ===
+        
+        // В адрес пишем кратко: "НП [номер]"
+        finalAddressLine = `НП ${npWarehouse}`;
+
+        // В Extended Fields пишем номер отделения (ключ, который мы узнали из дебага)
+        extendedFields = {
+            "namespaces": {
+                "_user_fields": {
+                    "nomer_viddilennya_poshtomatu_novoyi_poshti": npWarehouse
+                }
+            }
+        };
+
+    } else if (deliveryType === 'courier:nova-post') {
+        // === КУРЬЕР ===
+        
+        // Extended Fields пустые (или не передаем их вовсе)
+        
+        // В адрес пишем максимально полный адрес
+        if (npStreet) {
+             finalAddressLine = `${npStreet}`; 
+             // Если нужно, можно добавить город в addressLine, но город обычно идет в отдельном поле city
+        } else {
+             finalAddressLine = "Адресная доставка (уточнить у клиента)";
+        }
+
+    } else {
+        // Дефолт
+        finalAddressLine = npStreet || `Delivery: ${npWarehouse}`;
+    }
+
+    const shippingAddress = {
+        country: "UA",
+        city: npCity || "City",
+        addressLine: finalAddressLine, 
+        postalCode: "00000"
     };
 
     const wixOrderPayload = {
@@ -207,13 +236,7 @@ export default async function handler(req, res) {
         lineItems: lineItems,
         priceSummary: priceSummary,
         billingInfo: {
-            address: { 
-                country: "UA", 
-                city: String(murkitData.delivery?.settlementName || "City"),
-                // ИЗМЕНЕНИЕ: Текст адреса
-                addressLine: "невідома адреса", 
-                postalCode: "00000" 
-            },
+            address: shippingAddress, 
             contactDetails: {
                 firstName: clientName.firstName,
                 lastName: clientName.lastName,
@@ -239,12 +262,14 @@ export default async function handler(req, res) {
         paymentStatus: (murkitData.payment_status === 'paid' || String(murkitData.paymentType || '').includes('paid')) ? "PAID" : "NOT_PAID",
         currency: currency,
         weightUnit: "KG",
-        taxIncludedInPrices: false
+        taxIncludedInPrices: false,
+        // === ДОБАВЛЯЕМ EXTENDED FIELDS ===
+        // Передаем только если объект не пустой
+        ...(Object.keys(extendedFields).length > 0 ? { extendedFields } : {})
     };
 
     debugPayload = wixOrderPayload;
 
-    // 6. Send
     const createdOrder = await createWixOrder(wixOrderPayload);
     
     res.status(200).json({ 
