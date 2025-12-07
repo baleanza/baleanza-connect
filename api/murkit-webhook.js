@@ -119,7 +119,9 @@ export default async function handler(req, res) {
             throw new Error(`Product with SKU '${targetSku}' (Murkit Code: ${item.code}) not found in Wix.`);
         }
 
+        // Вот здесь мы берем ID из Wix (ответ на ваш вопрос №1)
         let catalogItemId = productMatch.id; 
+        
         let variantId = null;
         let stockData = productMatch.stock;
         let productName = productMatch.name;
@@ -176,6 +178,8 @@ export default async function handler(req, res) {
     const clientName = getFullName(murkitData.client?.name);
     const recipientName = getFullName(murkitData.recipient?.name);
     const phone = String(murkitData.client?.phone || murkitData.recipient?.phone || "").replace(/\D/g,'');
+    
+    // ИЗМЕНЕНИЕ: Новый дефолтный email
     const email = murkitData.client?.email || "monomarket@mywoodmood.com";
 
     const deliveryTitle = `${murkitData.deliveryType || 'Delivery'} (${murkitData.delivery?.settlementName || ''})`;
@@ -196,8 +200,8 @@ export default async function handler(req, res) {
 
     const wixOrderPayload = {
         channelInfo: {
-            type: "OTHER_PLATFORM", // Явно указан тип
-            externalOrderId: String(murkitData.number) // Номер заказа из Муркит
+            type: "OTHER_PLATFORM",
+            externalOrderId: String(murkitData.number)
         },
         status: "APPROVED",
         lineItems: lineItems,
@@ -206,7 +210,8 @@ export default async function handler(req, res) {
             address: { 
                 country: "UA", 
                 city: String(murkitData.delivery?.settlementName || "City"),
-                addressLine: "Client Address", 
+                // ИЗМЕНЕНИЕ: Текст адреса
+                addressLine: "невідома адреса", 
                 postalCode: "00000" 
             },
             contactDetails: {
