@@ -23,12 +23,12 @@ async function getOrderById(orderId) {
 
 // Запуск (можно вызвать локально через node api/get-order-debug.js <ORDER_ID>)
 // Или просто захардкодить ID для теста
-const TEST_ORDER_ID = "ВСТАВЬТЕ_СЮДА_ID_ВАШЕГО_ТЕСТОВОГО_ЗАКАЗА_ИЗ_WIX"; 
+const TEST_ORDER_ID = "11521"; 
 
 (async () => {
   try {
-    if (TEST_ORDER_ID === "ВСТАВЬТЕ_СЮДА_ID_ВАШЕГО_ТЕСТОВОГО_ЗАКАЗА_ИЗ_WIX") {
-        console.log("Пожалуйста, впишите реальный ID заказа в файл.");
+    if (TEST_ORDER_ID === "11521") {
+        console.log("11521");
         return;
     }
     const orderData = await getOrderById(TEST_ORDER_ID);
