@@ -174,7 +174,7 @@ export default async function handler(req, res) {
         total: { amount: fmtPrice(murkitData.sum), currency }
     };
 
-    // === ЛОГИКА ДОСТАВКИ И EXTENDED FIELDS ===
+    // === ЛОГИКА ФОРМИРОВАНИЯ АДРЕСА (2 СЦЕНАРИЯ) ===
     
     const deliveryType = String(murkitData.deliveryType || '');
     const npWarehouse = String(murkitData.delivery?.warehouseNumber || '').trim();
@@ -185,39 +185,33 @@ export default async function handler(req, res) {
     let extendedFields = {};
     let finalAddressLine = "невідома адреса";
 
-    const typesForPostomat = ['nova-post:branch', 'nova-post:cargo_branch', 'nova-post:postomat'];
-
-    if (typesForPostomat.includes(deliveryType)) {
-        // === ОТДЕЛЕНИЕ / ПОЧТОМАТ ===
+    // Проверяем: КУРЬЕР или НЕТ
+    if (deliveryType.includes('courier')) {
+        // === СЦЕНАРИЙ 1: КУРЬЕР ===
+        // Пишем полный адрес, чтобы курьер знал куда ехать
+        finalAddressLine = npStreet ? `${npStreet}` : `Адресная доставка (нет данных улицы)`;
         
-        // В адрес пишем кратко: "НП [номер]"
-        finalAddressLine = `НП ${npWarehouse}`;
-
-        // В Extended Fields пишем номер отделения (ключ, который мы узнали из дебага)
-        extendedFields = {
-            "namespaces": {
-                "_user_fields": {
-                    "nomer_viddilennya_poshtomatu_novoyi_poshti": npWarehouse
-                }
-            }
-        };
-
-    } else if (deliveryType === 'courier:nova-post') {
-        // === КУРЬЕР ===
-        
-        // Extended Fields пустые (или не передаем их вовсе)
-        
-        // В адрес пишем максимально полный адрес
-        if (npStreet) {
-             finalAddressLine = `${npStreet}`; 
-             // Если нужно, можно добавить город в addressLine, но город обычно идет в отдельном поле city
-        } else {
-             finalAddressLine = "Адресная доставка (уточнить у клиента)";
-        }
+        // extendedFields оставляем пустым
 
     } else {
-        // Дефолт
-        finalAddressLine = npStreet || `Delivery: ${npWarehouse}`;
+        // === СЦЕНАРИЙ 2: ОТДЕЛЕНИЕ / ПОЧТОМАТ (все остальное) ===
+        
+        // В адрес пишем строго: "Нова Пошта №X"
+        if (npWarehouse) {
+            finalAddressLine = `Нова Пошта №${npWarehouse}`;
+            
+            // Записываем номер в скрытое поле для интеграции
+            extendedFields = {
+                "namespaces": {
+                    "_user_fields": {
+                        "nomer_viddilennya_poshtomatu_novoyi_poshti": npWarehouse
+                    }
+                }
+            };
+        } else {
+            // Если вдруг отделение, но номера нет (ошибка данных)
+            finalAddressLine = "Нова Пошта (номер не указан)";
+        }
     }
 
     const shippingAddress = {
@@ -263,8 +257,7 @@ export default async function handler(req, res) {
         currency: currency,
         weightUnit: "KG",
         taxIncludedInPrices: false,
-        // === ДОБАВЛЯЕМ EXTENDED FIELDS ===
-        // Передаем только если объект не пустой
+        // Добавляем extendedFields только если они есть (для отделений)
         ...(Object.keys(extendedFields).length > 0 ? { extendedFields } : {})
     };
 
