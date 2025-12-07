@@ -23,12 +23,12 @@ async function getOrderById(orderId) {
 
 // Запуск (можно вызвать локально через node api/get-order-debug.js <ORDER_ID>)
 // Или просто захардкодить ID для теста
-const TEST_ORDER_ID = "11521"; 
+const TEST_ORDER_ID = "d18f5400-28b4-4f34-bd80-b29c6a098756"; 
 
 (async () => {
   try {
-    if (TEST_ORDER_ID === "11521") {
-        console.log("11521");
+    if (TEST_ORDER_ID === "d18f5400-28b4-4f34-bd80-b29c6a098756") {
+        console.log("d18f5400-28b4-4f34-bd80-b29c6a098756");
         return;
     }
     const orderData = await getOrderById(TEST_ORDER_ID);
