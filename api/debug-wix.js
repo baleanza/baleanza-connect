@@ -4,7 +4,7 @@ import { getInventoryBySkus, fetchAllProducts } from '../lib/wixClient.js';
 export default async function handler(req, res) {
   // Добавлена возможность передать параметр limit для просмотра большего кол-ва товаров
   const { sku, limit: limitQuery } = req.query; 
-  const LIMIT = parseInt(limitQuery) || 10; // По умолчанию показываем 10 товаров
+  const LIMIT = parseInt(limitQuery) || 5; // По умолчанию показываем 5 сырых товаров
 
   try {
     const startTime = Date.now();
@@ -13,29 +13,18 @@ export default async function handler(req, res) {
     const allProductsRaw = await fetchAllProducts(); 
     const durationFetch = Date.now() - startTime;
     
-    // --- НОВАЯ ЛОГИКА: Вывод списка всех продуктов (если sku не задан) ---
+    // --- НОВАЯ ЛОГИКА: Вывод сырого списка продуктов (если sku не задан) ---
     if (!sku) {
-      const productSummary = allProductsRaw.slice(0, LIMIT).map(p => {
-        return {
-          id: p.id,
-          sku: p.sku || 'No Base SKU',
-          name: p.name || 'No Name',
-          has_variants: (p.variants && p.variants.length > 0),
-          // Извлекаем только ключевые поля вариантов
-          variants: p.variants ? p.variants.map(v => ({
-              variantId: v.id,
-              // КЛЮЧЕВОЕ ПОЛЕ: variant?.sku
-              sku: v.variant?.sku || 'No Variant SKU', 
-          })) : []
-        };
-      });
+      const rawProductsSlice = allProductsRaw.slice(0, LIMIT);
 
       return res.status(200).json({
-        message: `Showing first ${productSummary.length} of ${allProductsRaw.length} products.`,
+        mode: "Raw Product Dump",
+        message: `Showing raw data for first ${rawProductsSlice.length} of ${allProductsRaw.length} products. Use ?sku=... for detailed lookup.`,
         total_products_fetched: allProductsRaw.length,
         fetch_duration_ms: durationFetch,
-        product_list_summary: productSummary,
-        note: "Raw SKU for variants is nested: variants[i].variant.sku. Please verify the 'sku' field in the 'variants' list below."
+        // Выводим срез сырых данных
+        raw_product_data_slice: rawProductsSlice,
+        note: "This is the raw data array received from Wix V1 API. Look inside the 'variants' array for variant details. The SKU for a variant is typically nested in: variants[i].variant.sku"
       });
     }
     // --- КОНЕЦ НОВОЙ ЛОГИКИ ---
