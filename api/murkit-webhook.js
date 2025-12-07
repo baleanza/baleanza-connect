@@ -155,6 +155,13 @@ export default async function handler(req, res) {
                 currency: currency
             },
             
+            // **** КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: ДОБАВЛЕНИЕ totalDiscount ****
+            totalDiscount: {
+                amount: "0.00",
+                currency: currency
+            },
+            // *******************************************************
+            
             physicalProperties: {
                 sku: wixSku || "N/A", 
                 shippable: true 
@@ -208,12 +215,22 @@ export default async function handler(req, res) {
         city: String(murkitData.delivery?.settlementName || "Не вказано"),
         addressLine: String(`НП №${murkitData.delivery?.warehouseNumber || "N/A"} (${murkitData.deliveryType || "N/A"})`),
     };
+    
+    const isPaid = (murkitData.payment_status === 'paid' || 
+                    (murkitData.paymentType && murkitData.paymentType.includes('mono')));
+    const paymentStatus = isPaid ? 'PAID' : 'NOT_PAID';
+
 
     const wixOrderPayload = {
         channelInfo: {
           type: "API",
           externalId: murkitOrderId 
         },
+        
+        buyerInfo: { 
+            email: defaultEmail,
+        },
+        
         lineItems: lineItems,
         
         priceSummary: priceSummaryPayload,
@@ -224,7 +241,7 @@ export default async function handler(req, res) {
             firstName: clientName.firstName,
             lastName: clientName.lastName,
             phone: clientPhone,
-            // company: "" (удалено, чтобы избежать пустой строки)
+            company: "" 
           }
         },
 
@@ -237,7 +254,7 @@ export default async function handler(req, res) {
                         firstName: recipientName.firstName,
                         lastName: recipientName.lastName,
                         phone: murkitData.recipient?.phone || clientPhone,
-                        // company: "" (удалено, чтобы избежать пустой строки)
+                        company: "" 
                     }
                 }
             },
@@ -246,7 +263,7 @@ export default async function handler(req, res) {
             }
         },
         
-        paymentStatus: String(murkitData.paymentType && murkitData.paymentType.includes('mono') ? 'PAID' : 'NOT_PAID'),
+        paymentStatus: paymentStatus,
         currency: currency,
         
         customFields: [
@@ -256,11 +273,6 @@ export default async function handler(req, res) {
             { title: "Відділення НП", value: String(murkitData.delivery?.warehouseNumber || "Не вказано") },
         ]
     };
-
-    // **** ДОБАВЛЕНО ДЛЯ ОТЛАДКИ (печатает JSON перед отправкой) ****
-    console.log('Wix Payload (PRE-SEND):', JSON.stringify(wixOrderPayload, null, 2));
-    // ********************************************************************
-
 
     // 9. Отправляем в Wix
     const createdOrder = await createWixOrder(wixOrderPayload);
