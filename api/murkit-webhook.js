@@ -72,8 +72,8 @@ function getFullName(nameObj) {
     if (!nameObj) return { firstName: "Client", lastName: "" };
     // Учитываем вложенные объекты имени {first: "...", last: "..."}
     return {
-        firstName: nameObj.first || nameObj.firstName || "Client",
-        lastName: nameObj.last || nameObj.lastName || ""
+        firstName: String(nameObj.first || nameObj.firstName || "Client"),
+        lastName: String(nameObj.last || nameObj.lastName || "")
     };
 }
 
@@ -93,6 +93,7 @@ export default async function handler(req, res) {
 
   try {
     const murkitData = req.body;
+    // Убедимся, что ID заказа всегда строка
     const murkitOrderId = String(murkitData.number || murkitData.id); 
     console.log('New Order from Murkit:', JSON.stringify(murkitData, null, 2));
 
@@ -111,7 +112,7 @@ export default async function handler(req, res) {
     // 3. Собираем все Wix SKU для запроса к Wix
     const murkitCodes = murkitItems.map(item => String(item.code).trim()).filter(Boolean);
     const wixSkus = murkitCodes
-      .map(code => codeToSkuMap[code] || code) // Fallback to code if mapping not found
+      .map(code => codeToSkuMap[code] || code) 
       .filter(Boolean);
 
     if (wixSkus.length === 0) {
@@ -131,24 +132,26 @@ export default async function handler(req, res) {
     // 5. РАСЧЕТ ИТОГОВ и ФОРМИРОВАНИЕ ПЕРЕМЕННЫХ
     const currency = "UAH";
     
-    const totalAmount = parseFloat(murkitData.sum || 0).toFixed(2);
-    const subtotalAmount = totalAmount; // Предполагаем, что total = subtotal
+    // Строгое приведение к строке с 2 знаками после запятой
+    const totalAmount = String(parseFloat(murkitData.sum || 0).toFixed(2));
+    const subtotalAmount = totalAmount; 
     
     const clientName = getFullName(murkitData.client?.name);
     const recipientName = getFullName(murkitData.recipient?.name);
-    const defaultEmail = murkitData.client?.email || murkitData.recipient?.email || "monomarket@mywoodmood.com"; 
-    const clientPhone = murkitData.client?.phone || murkitData.recipient?.phone || "";
+    const defaultEmail = String(murkitData.client?.email || murkitData.recipient?.email || "monomarket@mywoodmood.com"); 
+    const clientPhone = String(murkitData.client?.phone || murkitData.recipient?.phone || "");
 
     // 6. ФОРМИРОВАНИЕ LINE ITEMS
     const lineItems = murkitItems.map(item => {
         const murkitCode = String(item.code).trim();
-        const wixSku = codeToSkuMap[murkitCode] || murkitCode; 
+        const wixSku = String(codeToSkuMap[murkitCode] || murkitCode); // Строго строка
         const wixId = wixSku ? skuToIdMap[wixSku] : null;
         
-        const price = parseFloat(item.price || 0).toFixed(2);
+        // Цена элемента - строго строка с 2 знаками
+        const price = String(parseFloat(item.price || 0).toFixed(2));
 
         const baseItem = {
-            name: item.name || `Item ${murkitCode}`, 
+            name: String(item.name || `Item ${murkitCode}`), 
             quantity: parseInt(item.quantity || 1, 10),
             price: {
                 amount: price,
@@ -158,6 +161,7 @@ export default async function handler(req, res) {
                 { title: "SKU", value: wixSku },
                 { title: "Murkit Code", value: murkitCode }
             ],
+            // Все цены LineItem - строго строки
             totalPriceBeforeTax: { amount: price, currency: currency },
             totalPriceAfterTax: { amount: price, currency: currency },
             lineItemPrice: { amount: price, currency: currency }
@@ -186,7 +190,23 @@ export default async function handler(req, res) {
         total: { amount: totalAmount, currency: currency },
     };
 
-    // 8. ФОРМИРОВАНИЕ ОБЪЕКТА ЗАКАЗА WIX (УЖЕ БЕЗ КЛЮЧА 'order')
+    // 8. ФОРМИРОВАНИЕ ОБЪЕКТА ЗАКАЗА WIX
+    
+    // Адрес для Billing (Клиент)
+    const billingAddress = {
+        country: "UA",
+        city: String(murkitData.delivery?.settlementName || "Не вказано"),
+        addressLine: String("Телефон: " + clientPhone), 
+        email: defaultEmail,
+    };
+    
+    // Адрес для Shipping (Получатель)
+    const shippingAddress = {
+        country: "UA",
+        city: String(murkitData.delivery?.settlementName || "Не вказано"),
+        addressLine: String(`НП №${murkitData.delivery?.warehouseNumber || "N/A"} (${murkitData.deliveryType || "N/A"})`),
+    };
+
     const wixOrderPayload = {
         channelInfo: {
           type: "API",
@@ -194,17 +214,10 @@ export default async function handler(req, res) {
         },
         lineItems: lineItems,
         
-        // 9. TOTALS / PRICE SUMMARY
         priceSummary: priceSummaryPayload,
         
-        // 10. BILLING INFO (Клиент)
         billingInfo: {
-          address: {
-            country: "UA",
-            city: murkitData.delivery?.settlementName || "Не вказано",
-            addressLine: "Телефон: " + clientPhone, 
-            email: defaultEmail,
-          },
+          address: billingAddress,
           contactDetails: {
             firstName: clientName.firstName,
             lastName: clientName.lastName,
@@ -213,16 +226,11 @@ export default async function handler(req, res) {
           }
         },
 
-        // 11. SHIPPING INFO (Получатель и детали доставки)
         shippingInfo: {
-            title: `Доставка: ${murkitData.deliveryType || 'Не вказано'}`,
+            title: String(`Доставка: ${murkitData.deliveryType || 'Не вказано'}`),
             logistics: {
                 shippingDestination: {
-                    address: {
-                        country: "UA",
-                        city: murkitData.delivery?.settlementName || "Не вказано",
-                        addressLine: `НП №${murkitData.delivery?.warehouseNumber || "N/A"} (${murkitData.deliveryType || "N/A"})`,
-                    },
+                    address: shippingAddress,
                     contactDetails: {
                         firstName: recipientName.firstName,
                         lastName: recipientName.lastName,
@@ -236,23 +244,22 @@ export default async function handler(req, res) {
             }
         },
         
-        paymentStatus: murkitData.paymentType && murkitData.paymentType.includes('mono') ? 'PAID' : 'NOT_PAID',
+        paymentStatus: String(murkitData.paymentType && murkitData.paymentType.includes('mono') ? 'PAID' : 'NOT_PAID'),
         currency: currency,
         
-        // 12. Добавление кастомных полей заказа
         customFields: [
             { title: "Murkit Order ID", value: murkitOrderId },
-            { title: "Тип доставки", value: murkitData.deliveryType || "Не вказано" },
-            { title: "Місто (НП)", value: murkitData.delivery?.settlementName || "Не вказано" },
-            { title: "Відділення НП", value: murkitData.delivery?.warehouseNumber || "Не вказано" },
+            { title: "Тип доставки", value: String(murkitData.deliveryType || "Не вказано") },
+            { title: "Місто (НП)", value: String(murkitData.delivery?.settlementName || "Не вказано") },
+            { title: "Відділення НП", value: String(murkitData.delivery?.warehouseNumber || "Не вказано") },
         ]
     };
 
-    // 13. Отправляем в Wix
+    // 9. Отправляем в Wix
     const createdOrder = await createWixOrder(wixOrderPayload);
     console.log('Order created in Wix:', createdOrder.order?.id);
 
-    // 14. Отвечаем Murkit успешным статусом
+    // 10. Отвечаем Murkit успешным статусом
     res.status(200).json({ 
         success: true, 
         wix_order_id: createdOrder.order?.id 
