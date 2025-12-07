@@ -2,8 +2,11 @@ import { createWixOrder, getProductsBySkus } from '../lib/wixClient.js';
 import { ensureAuth } from '../lib/sheetsClient.js'; 
 
 const WIX_STORES_APP_ID = "215238eb-22a5-4c36-9e7b-e7c08025e04e"; 
+const SHIPPING_TITLES = {
+    BRANCH: "НП відділення", 
+    COURIER: "НП кур'єр"
+};
 
-// Проверка Auth
 function checkAuth(req) {
   const authHeader = req.headers.authorization;
   if (!authHeader) return false;
@@ -12,7 +15,6 @@ function checkAuth(req) {
   return login === process.env.MURKIT_USER && password === process.env.MURKIT_PASS;
 }
 
-// Чтение таблицы
 async function readSheetData(sheets, spreadsheetId) {
   const importRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Import!A1:ZZ' });
   const controlRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Feed Control List!A1:F' });
@@ -22,7 +24,6 @@ async function readSheetData(sheets, spreadsheetId) {
   };
 }
 
-// Маппинг
 function getProductSkuMap(importValues, controlValues) {
     const headers = importValues[0] || [];
     const rows = importValues.slice(1);
@@ -123,12 +124,25 @@ export default async function handler(req, res) {
         let variantId = null;
         let stockData = productMatch.stock;
         let productName = productMatch.name;
+        
+        let imageObj = null;
+        // Берем главную картинку товара, если она есть
+        if (productMatch.media && productMatch.media.mainMedia && productMatch.media.mainMedia.image) {
+            imageObj = {
+                url: productMatch.media.mainMedia.image.url,
+                // Wix иногда требует ширину/высоту, но часто хватает url. Попробуем передать как есть.
+                width: productMatch.media.mainMedia.image.width,
+                height: productMatch.media.mainMedia.image.height
+            };
+        }
 
         if (String(productMatch.sku) !== targetSku && productMatch.variants) {
             const variantMatch = productMatch.variants.find(v => String(v.variant?.sku) === targetSku);
             if (variantMatch) {
                 variantId = variantMatch.variant.id; 
                 stockData = variantMatch.stock; 
+                // Если у варианта есть своя картинка, можно попробовать взять её, 
+                // но Wix API Products V1 часто хранит всё в общем media.
             }
         }
 
@@ -147,7 +161,7 @@ export default async function handler(req, res) {
             catalogRef.options = { variantId: variantId };
         }
 
-        lineItems.push({
+        const lineItem = {
             quantity: requestedQty,
             catalogReference: catalogRef,
             productName: { original: productName },
@@ -155,7 +169,13 @@ export default async function handler(req, res) {
             physicalProperties: { sku: targetSku, shippable: true },
             price: { amount: fmtPrice(item.price) },
             taxDetails: { taxRate: "0", totalTax: { amount: "0.00", currency: currency } }
-        });
+        };
+
+        if (imageObj) {
+            lineItem.image = imageObj;
+        }
+
+        lineItems.push(lineItem);
     }
 
     // 5. Order Data Preparation
@@ -163,8 +183,6 @@ export default async function handler(req, res) {
     const recipientName = getFullName(murkitData.recipient?.name);
     const phone = String(murkitData.client?.phone || murkitData.recipient?.phone || "").replace(/\D/g,'');
     const email = murkitData.client?.email || "monomarket@mywoodmood.com";
-
-    const deliveryTitle = `${murkitData.deliveryType || 'Delivery'} (${murkitData.delivery?.settlementName || ''})`;
 
     const priceSummary = {
         subtotal: { amount: fmtPrice(murkitData.sum), currency },
@@ -174,33 +192,30 @@ export default async function handler(req, res) {
         total: { amount: fmtPrice(murkitData.sum), currency }
     };
 
-    // === ЛОГИКА ФОРМИРОВАНИЯ АДРЕСА (2 СЦЕНАРИЯ) ===
     
     const deliveryType = String(murkitData.deliveryType || '');
     const npWarehouse = String(murkitData.delivery?.warehouseNumber || '').trim();
     const npCity = String(murkitData.delivery?.settlementName || '').trim();
-    // Полный адрес для курьера (улица, дом, кв)
     const npStreet = String(murkitData.delivery?.address || '').trim();
 
     let extendedFields = {};
     let finalAddressLine = "невідома адреса";
+    let deliveryTitle = "Delivery"; // Заголовок, который увидит Wix
 
-    // Проверяем: КУРЬЕР или НЕТ
+    // Проверяем: КУРЬЕР или ОТДЕЛЕНИЕ
     if (deliveryType.includes('courier')) {
         // === СЦЕНАРИЙ 1: КУРЬЕР ===
-        // Пишем полный адрес, чтобы курьер знал куда ехать
-        finalAddressLine = npStreet ? `${npStreet}` : `Адресная доставка (нет данных улицы)`;
-        
-        // extendedFields оставляем пустым
+        deliveryTitle = SHIPPING_TITLES.COURIER; // "Нова Пошта (Кур'єр)"
+        finalAddressLine = npStreet ? `${npStreet}` : `Адресна доставка`;
 
     } else {
-        // === СЦЕНАРИЙ 2: ОТДЕЛЕНИЕ / ПОЧТОМАТ (все остальное) ===
+        // === СЦЕНАРИЙ 2: ОТДЕЛЕНИЕ / ПОЧТОМАТ ===
+        deliveryTitle = SHIPPING_TITLES.BRANCH; // "Нова Пошта (Відділення)"
         
-        // В адрес пишем строго: "Нова Пошта №X"
         if (npWarehouse) {
             finalAddressLine = `Нова Пошта №${npWarehouse}`;
             
-            // Записываем номер в скрытое поле для интеграции
+            // Пишем номер отделения в скрытое поле
             extendedFields = {
                 "namespaces": {
                     "_user_fields": {
@@ -209,10 +224,10 @@ export default async function handler(req, res) {
                 }
             };
         } else {
-            // Если вдруг отделение, но номера нет (ошибка данных)
             finalAddressLine = "Нова Пошта (номер не указан)";
         }
     }
+    
 
     const shippingAddress = {
         country: "UA",
@@ -239,7 +254,7 @@ export default async function handler(req, res) {
             }
         },
         shippingInfo: {
-            title: deliveryTitle,
+            title: deliveryTitle, // Передаем правильный заголовок метода
             logistics: {
                 shippingDestination: {
                     address: shippingAddress,
@@ -257,7 +272,7 @@ export default async function handler(req, res) {
         currency: currency,
         weightUnit: "KG",
         taxIncludedInPrices: false,
-        // Добавляем extendedFields только если они есть (для отделений)
+
         ...(Object.keys(extendedFields).length > 0 ? { extendedFields } : {})
     };
 
