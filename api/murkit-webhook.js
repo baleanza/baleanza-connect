@@ -199,6 +199,7 @@ export default async function handler(req, res) {
             type: "OTHER_PLATFORM", // Явно указан тип
             externalOrderId: String(murkitData.number) // Номер заказа из Муркит
         },
+        status: "APPROVED",
         lineItems: lineItems,
         priceSummary: priceSummary,
         billingInfo: {
