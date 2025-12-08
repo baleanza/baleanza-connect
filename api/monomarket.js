@@ -18,17 +18,15 @@ async function readSheetData(sheets, spreadsheetId) {
     };
 }
 
-
 export default async function handler(req, res) {
   const AUTH_USER = process.env.MONOMARKET_USER;
   const AUTH_PASS = process.env.MONOMARKET_PASSWORD;
   
-  // Якщо облікові дані для захисту встановлені, активуємо перевірку
+  // Якщо облікові дані для захисту встановлені, активуємо перевірку (Basic Auth)
   if (AUTH_USER && AUTH_PASS) {
       const authHeader = req.headers.authorization;
       
       if (!authHeader || !authHeader.startsWith('Basic ')) {
-          // Надсилаємо заголовок, щоб викликати стандартне вікно входу в браузері
           res.setHeader('WWW-Authenticate', 'Basic realm="Monomarket Private Area"');
           return res.status(401).send('Unauthorized');
       }
@@ -93,10 +91,27 @@ export default async function handler(req, res) {
     if (fieldMap['code']) {
         colCode = headers.indexOf(fieldMap['code']);
     }
-    // If not found in mapping, look for "code" header
     if (colCode === -1) {
         colCode = headers.indexOf('code');
     }
+    
+    // 5. Find Image columns (image_1 to image_7)
+    const imageCols = [];
+    const maxImages = 7;
+    for (let i = 1; i <= maxImages; i++) {
+        const feedName = `image_${i}`;
+        const sheetHeader = fieldMap[feedName]; // Get sheet header from control list
+        let colIndex = -1;
+        
+        if (sheetHeader) {
+            colIndex = headers.indexOf(sheetHeader);
+        }
+        // Save the index, even if -1, to maintain order
+        imageCols.push({ index: colIndex, feedName: feedName });
+    }
+    
+    // --- END COLUMN INDEX DEFINITION ---
+
 
     if (colSku === -1) return res.status(500).send('<h1>Помилка: Не знайдено колонку SKU для синхронізації</h1>');
 
@@ -112,12 +127,24 @@ export default async function handler(req, res) {
       const priceVal = colPrice > -1 ? row[colPrice] : '0';
       const codeVal = colCode > -1 ? (row[colCode] || '') : ''; 
       
+      const images = [];
+      imageCols.forEach(imgCol => {
+          if (imgCol.index > -1) {
+              // Ensure URL is a non-empty string
+              const url = row[imgCol.index] ? String(row[imgCol.index]).trim() : '';
+              images.push(url);
+          } else {
+              images.push(''); // Placeholder for missing mapping
+          }
+      });
+      
       tableData.push({
         sku: sku,
         code: codeVal,
         name: colName > -1 ? row[colName] : '(Без назви)',
         priceRaw: priceVal,
-        price: cleanPrice(priceVal)
+        price: cleanPrice(priceVal),
+        images: images // NEW
       });
     });
 
@@ -174,6 +201,47 @@ export default async function handler(req, res) {
           table { border-collapse: collapse; width: 100%; margin-top: 15px; }
           th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
           th { background-color: #f2f2f2; }
+          
+          /* NEW IMAGE STYLES */
+          .img-cell {
+              padding: 0 !important; 
+              width: 40px; 
+              height: 40px; 
+              min-width: 40px;
+              min-height: 40px;
+              text-align: center; 
+              vertical-align: middle;
+              line-height: 0; 
+              border-left: 1px dashed #eee; 
+          }
+          .img-cell img {
+              max-width: 40px;
+              max-height: 40px;
+              object-fit: contain; 
+              display: block;
+              margin: 0 auto;
+              transition: transform 0.2s;
+              cursor: pointer;
+          }
+          .img-cell img:hover {
+              transform: scale(3.5); /* Zoom effect on hover */
+              z-index: 10;
+              position: absolute;
+              border: 1px solid #ccc;
+              background: white;
+              box-shadow: 0 0 10px rgba(0,0,0,0.5);
+          }
+          .img-placeholder {
+              display: block;
+              width: 100%;
+              height: 100%;
+              background-color: #f9f9f9; 
+              font-size: 8px;
+              line-height: 40px;
+              color: #bbb;
+          }
+          /* END NEW IMAGE STYLES */
+
           .instock { background-color: #d4edda; color: #155724; font-weight: bold; }
           .outstock { background-color: #f8d7da; color: #721c24; }
           .warn { background-color: #fff3cd; color: #856404; }
@@ -207,7 +275,7 @@ export default async function handler(req, res) {
                 resultSpan.className = "lookup-result";
 
                 try {
-                    // ЗМІНА ТУТ: Використовуємо шлях /debug-order, згідно з vercel.json
+                    // Використовуємо шлях /debug-order, згідно з vercel.json
                     const res = await fetch('/debug-order?id=' + encodeURIComponent(id));
                     
                     // 1. Check response status to avoid HTML parsing errors
@@ -240,7 +308,7 @@ export default async function handler(req, res) {
             }
         </script>
 
-        <h2>Monomarket Product Table</h2>
+        <h2>Monomarket Feed Table</h2>
         
         <div class="summary">
           Усього товарів у таблиці: ${tableData.length} <br>
@@ -251,6 +319,13 @@ export default async function handler(req, res) {
           <thead>
             <tr>
               <th>Product ID</th>
+              <th title="Фото 1" class="img-cell">Ф1</th>
+              <th title="Фото 2" class="img-cell">Ф2</th>
+              <th title="Фото 3" class="img-cell">Ф3</th>
+              <th title="Фото 4" class="img-cell">Ф4</th>
+              <th title="Фото 5" class="img-cell">Ф5</th>
+              <th title="Фото 6" class="img-cell">Ф6</th>
+              <th title="Фото 7" class="img-cell">Ф7</th>
               <th>Артикул (SKU)</th>
               <th>Назва (Sheet)</th>
               <th>Ціна (Sheet)</th>
@@ -284,6 +359,15 @@ export default async function handler(req, res) {
       html += `
         <tr>
           <td>${item.code}</td>
+          
+          ${item.images.map((url, index) => `
+            <td class="img-cell" title="Фото ${index + 1}">
+              ${url && url !== 'CellImage' // Google Sheets sometimes returns 'CellImage' string
+                ? `<img src="${url}" alt="Фото ${index + 1}" loading="lazy">` 
+                : `<span class="img-placeholder">-</span>`
+              }
+            </td>
+          `).join('')}
           <td>${item.sku}</td>
           <td>${item.name}</td>
           <td>${item.price.toFixed(2)} ₴</td>
