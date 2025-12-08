@@ -1,45 +1,33 @@
-import { createWixOrder, getProductsBySkus, findWixOrderByExternalId } from '../lib/wixClient.js';
+import { createWixOrder, getProductsBySkus } from '../lib/wixClient.js';
 import { ensureAuth } from '../lib/sheetsClient.js'; 
+import { google } from 'googleapis';
 
-const WIX_STORES_APP_ID = "215238eb-22a5-4c36-9e7b-e7c08025e04e"; 
-
-// === НАЛАШТУВАННЯ НАЗВ ДОСТАВКИ ===
-const SHIPPING_TITLES = {
-    BRANCH: "Нова Пошта (Відділення)", 
-    COURIER: "Нова Пошта (Кур'єр)"
-};
-
-// Хелпер для створення кастомних помилок
-function createError(status, message, code = null) {
-    const err = new Error(message);
-    err.status = status;
-    if (code) err.code = code;
-    return err;
-}
-
-// Нормалізація SKU: рядок, без пробілів
-function normalizeSku(sku) {
-    if (!sku) return '';
-    return String(sku).trim();
-}
-
+// Проверка Basic Auth
 function checkAuth(req) {
   const authHeader = req.headers.authorization;
   if (!authHeader) return false;
+
   const b64auth = authHeader.split(' ')[1];
   const [login, password] = Buffer.from(b64auth, 'base64').toString().split(':');
-  return login === process.env.MURKIT_USER && password === process.env.MURKIT_PASS;
+
+  const expectedUser = process.env.MURKIT_USER;
+  const expectedPass = process.env.MURKIT_PASS;
+
+  return login === expectedUser && password === expectedPass;
 }
 
+// Новая функция для чтения данных Sheets
 async function readSheetData(sheets, spreadsheetId) {
   const importRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Import!A1:ZZ' });
   const controlRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Feed Control List!A1:F' });
+
   return { 
     importValues: importRes.data.values || [], 
     controlValues: controlRes.data.values || [] 
   };
 }
 
+// Функция для создания карты: Murkit Code -> Wix SKU
 function getProductSkuMap(importValues, controlValues) {
     const headers = importValues[0] || [];
     const rows = importValues.slice(1);
@@ -49,345 +37,255 @@ function getProductSkuMap(importValues, controlValues) {
     const idxImportField = controlHeaders.indexOf('Import field');
     const idxFeedName = controlHeaders.indexOf('Feed name');
 
-    let murkitCodeColRaw = '';
-    let wixSkuColRaw = '';
+    let murkitCodeSheetField = '';
+    let wixSkuSheetField = '';
 
     controlRows.forEach(row => {
         const importField = row[idxImportField];
         const feedName = row[idxFeedName];
-        if (feedName === 'code') murkitCodeColRaw = String(importField).trim();
-        if (feedName === 'id') wixSkuColRaw = String(importField).trim();
+        if (feedName === 'code') murkitCodeSheetField = String(importField).trim();
+        if (feedName === 'id') wixSkuSheetField = String(importField).trim();
     });
     
-    const murkitCodeColIndex = headers.indexOf(murkitCodeColRaw);
-    const wixSkuColIndex = headers.indexOf(wixSkuColRaw);
+    const murkitCodeColIndex = headers.indexOf(murkitCodeSheetField);
+    const wixSkuColIndex = headers.indexOf(wixSkuSheetField);
     
-    if (murkitCodeColIndex === -1 || wixSkuColIndex === -1) return {};
+    if (murkitCodeColIndex === -1 || wixSkuColIndex === -1) {
+        console.warn(`Cannot find required mapping columns (Code: ${murkitCodeSheetField}, SKU: ${wixSkuSheetField}) in Import sheet.`);
+        return {};
+    }
 
     const map = {};
     rows.forEach(row => {
-        const mCode = row[murkitCodeColIndex] ? String(row[murkitCodeColIndex]).trim() : '';
-        const wSku = row[wixSkuColIndex] ? String(row[wixSkuColIndex]).trim() : '';
-        if (mCode && wSku) map[mCode] = wSku;
+        const murkitCode = row[murkitCodeColIndex] ? String(row[murkitCodeColIndex]).trim() : '';
+        const wixSku = row[wixSkuColIndex] ? String(row[wixSkuColIndex]).trim() : '';
+        if (murkitCode && wixSku) {
+            map[murkitCode] = wixSku;
+        }
     });
+    
     return map;
 }
 
-const fmtPrice = (num) => parseFloat(num || 0).toFixed(2);
-
+// Вспомогательная функция для получения имени получателя
 function getFullName(nameObj) {
     if (!nameObj) return { firstName: "Client", lastName: "" };
+    // Учитываем вложенные объекты имени {first: "...", last: "..."}
     return {
         firstName: String(nameObj.first || nameObj.firstName || "Client"),
         lastName: String(nameObj.last || nameObj.lastName || "")
     };
 }
 
+
 export default async function handler(req, res) {
-  if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
-  if (!checkAuth(req)) return res.status(401).json({ error: 'Unauthorized' });
+  if (req.method !== 'POST') {
+    res.status(405).send('Method Not Allowed');
+    return;
+  }
+
+  // 1. Проверяем авторизацию
+  if (!checkAuth(req)) {
+    console.warn('Unauthorized access attempt to Murkit Webhook');
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
 
   try {
     const murkitData = req.body;
-    
-    // Валідація номеру замовлення
-    if (!murkitData.number) throw createError(400, 'Missing order number');
-    const murkitOrderId = String(murkitData.number);
-    console.log(`Processing Murkit Order #${murkitOrderId}`);
+    const murkitOrderId = String(murkitData.number || murkitData.id); 
+    console.log('New Order from Murkit:', JSON.stringify(murkitData, null, 2));
 
-    // === КРОК 0: ДЕДУПЛІКАЦІЯ ===
-    const existingOrder = await findWixOrderByExternalId(murkitOrderId);
-    if (existingOrder) {
-        console.log(`Order #${murkitOrderId} already exists. ID: ${existingOrder.id}`);
-        return res.status(200).json({ "id": existingOrder.id });
+    const murkitItems = murkitData.items || [];
+    if (murkitItems.length === 0) {
+      res.status(400).json({ error: 'No items in order' });
+      return;
     }
 
-    // === ВАЛІДАЦІЯ ТОВАРІВ ===
-    const murkitItems = murkitData.items || [];
-    if (murkitItems.length === 0) throw createError(400, 'No items in order');
-
-    const currency = "UAH";
-
-    // 1. Sheets
+    // 2. ЗАГРУЗКА И СОЗДАНИЕ КАРТЫ СОПОСТАВЛЕНИЯ
     const { sheets, spreadsheetId } = await ensureAuth();
     const { importValues, controlValues } = await readSheetData(sheets, spreadsheetId);
+    
     const codeToSkuMap = getProductSkuMap(importValues, controlValues);
     
-    // 2. Resolve SKUs
-    const wixSkusToFetch = [];
-    const itemsWithSku = murkitItems.map(item => {
-        const mCode = String(item.code).trim();
-        const wSku = codeToSkuMap[mCode] || mCode;
-        if(wSku) wixSkusToFetch.push(wSku);
-        return { ...item, wixSku: wSku };
-    });
+    // 3. Собираем все Wix SKU для запроса к Wix
+    const murkitCodes = murkitItems.map(item => String(item.code).trim()).filter(Boolean);
+    const wixSkus = murkitCodes
+      .map(code => codeToSkuMap[code] || code) 
+      .filter(Boolean);
 
-    if (wixSkusToFetch.length === 0) {
-        throw createError(400, 'No valid SKUs found to fetch from Wix');
+    if (wixSkus.length === 0) {
+        res.status(400).json({ error: 'None of the Murkit product codes could be mapped to a Wix SKU.' });
+        return;
     }
 
-    // 3. Fetch Wix Products
-    const wixProducts = await getProductsBySkus(wixSkusToFetch);
+    // 4. Ищем эти товары в Wix, чтобы получить их ID
+    const wixProducts = await getProductsBySkus(wixSkus);
     
-    // === СТВОРЕННЯ МАПИ SKU (Flattening) ===
-    // Щоб точно знаходити варіанти, ми "розгортаємо" структуру Wix в плаский об'єкт
-    const skuMap = {};
-
+    // Создаем карту: Wix SKU -> Wix Product ID
+    const skuToIdMap = {};
     wixProducts.forEach(p => {
-        // Додаємо батьківський SKU
-        const pSku = normalizeSku(p.sku);
-        if (pSku) {
-            skuMap[pSku] = {
-                type: 'product',
-                product: p,
-                variantData: null
-            };
-        }
-
-        // Додаємо SKU варіантів
-        if (p.variants && p.variants.length > 0) {
-            p.variants.forEach(v => {
-                const vSku = normalizeSku(v.variant?.sku);
-                if (vSku) {
-                    skuMap[vSku] = {
-                        type: 'variant',
-                        product: p,
-                        variantData: v
-                    };
-                }
-            });
-        }
+      skuToIdMap[p.sku] = p.id;
     });
 
-    // 4. Line Items
-    const lineItems = [];
+    // 5. РАСЧЕТ ИТОГОВ и ФОРМИРОВАНИЕ ПЕРЕМЕННЫХ
+    const currency = "UAH";
     
-    for (const item of itemsWithSku) {
-        const requestedQty = parseInt(item.quantity || 1, 10);
-        const targetSku = normalizeSku(item.wixSku); // Цільовий SKU
-
-        // МИТТЄВИЙ ПОШУК ПО МАПІ
-        const match = skuMap[targetSku];
-
-        // === ПОМИЛКА: ТОВАР НЕ ЗНАЙДЕНО (409) ===
-        if (!match) {
-            throw createError(409, `Product with code ${item.code} not found`, "ITEM_NOT_FOUND");
-        }
-
-        const foundProduct = match.product;
-        const foundVariant = match.variantData; // null, якщо це простий товар
-
-        let catalogItemId = foundProduct.id; 
-        let variantId = null;
-        let stockData = foundProduct.stock; // Дефолт (батьківський)
-        let productName = foundProduct.name;
-        
-        let variantChoices = null; 
-        let descriptionLines = []; 
-        
-        // ЯКЩО ЦЕ ВАРІАНТ
-        if (foundVariant) {
-            console.log(`[INFO] SKU ${targetSku} confirmed as VARIANT: ${foundVariant.variant.id}`);
-            
-            variantId = foundVariant.variant.id; 
-            stockData = foundVariant.stock; 
-            
-            // ВАЖЛИВО: Опції лежать в корені об'єкта варіанта (foundVariant.choices)
-            if (foundVariant.choices) {
-                variantChoices = foundVariant.choices; 
-                
-                // Формуємо descriptionLines
-                descriptionLines = Object.entries(variantChoices).map(([k, v]) => ({
-                    name: { original: k, translated: k },
-                    plainText: { original: v, translated: v },
-                    lineType: "PLAIN_TEXT"
-                }));
-            }
-        } else {
-            console.log(`[INFO] SKU ${targetSku} confirmed as SIMPLE PRODUCT`);
-        }
-
-        // === ПЕРЕВІРКА СТОКУ (409 ITEM_NOT_AVAILABLE) ===
-        
-        // 1. Якщо товар помічений як "немає в наявності"
-        if (stockData.inStock === false) {
-             throw createError(409, `Product with code ${item.code} has not enough stock`, "ITEM_NOT_AVAILABLE");
-        }
-        
-        // 2. Якщо увімкнено трекінг кількості і її не вистачає
-        if (stockData.trackQuantity && (stockData.quantity < requestedQty)) {
-             throw createError(409, `Product with code ${item.code} has not enough stock`, "ITEM_NOT_AVAILABLE");
-        }
-
-        // Картинка
-        let imageObj = null;
-        if (foundProduct.media && foundProduct.media.mainMedia && foundProduct.media.mainMedia.image) {
-            imageObj = {
-                url: foundProduct.media.mainMedia.image.url,
-                width: foundProduct.media.mainMedia.image.width,
-                height: foundProduct.media.mainMedia.image.height
-            };
-        }
-
-        // Формуємо посилання на каталог
-        const catalogRef = {
-            catalogItemId: catalogItemId,
-            appId: WIX_STORES_APP_ID
-        };
-
-        if (variantId) {
-            catalogRef.options = { variantId: variantId };
-            // Додаємо карту опцій, щоб Wix коректно відобразив варіант
-            if (variantChoices) {
-                catalogRef.options.options = variantChoices;
-            }
-        }
-
-        const lineItem = {
-            quantity: requestedQty,
-            catalogReference: catalogRef,
-            productName: { original: productName },
-            descriptionLines: descriptionLines, // Передаємо опції
-            itemType: { preset: "PHYSICAL" },
-            physicalProperties: { sku: targetSku, shippable: true },
-            price: { amount: fmtPrice(item.price) },
-            taxDetails: { taxRate: "0", totalTax: { amount: "0.00", currency: currency } }
-        };
-
-        if (imageObj) {
-            lineItem.image = imageObj;
-        }
-
-        lineItems.push(lineItem);
-    }
-
-    // 5. Order Data Preparation
+    const totalAmount = String(parseFloat(murkitData.sum || 0).toFixed(2));
+    const subtotalAmount = totalAmount; 
+    
     const clientName = getFullName(murkitData.client?.name);
     const recipientName = getFullName(murkitData.recipient?.name);
-    const phone = String(murkitData.client?.phone || murkitData.recipient?.phone || "").replace(/\D/g,'');
-    const email = murkitData.client?.email || "monomarket@mywoodmood.com";
+    const defaultEmail = String(murkitData.client?.email || murkitData.recipient?.email || "monomarket@mywoodmood.com"); 
+    const clientPhone = String(murkitData.client?.phone || murkitData.recipient?.phone || "");
 
-    const priceSummary = {
-        subtotal: { amount: fmtPrice(murkitData.sum), currency },
-        shipping: { amount: "0.00", currency }, 
-        tax: { amount: "0.00", currency },
-        discount: { amount: "0.00", currency },
-        total: { amount: fmtPrice(murkitData.sum), currency }
-    };
-
-    // === ЛОГІКА ДОСТАВКИ ===
-    const d = murkitData.delivery || {}; 
-    const deliveryType = String(murkitData.deliveryType || '');
-    
-    const npCity = String(d.settlement || d.city || d.settlementName || '').trim();
-    const street = String(d.address || '').trim();
-    const house = String(d.house || '').trim();
-    const flat = String(d.flat || '').trim();
-    const npWarehouse = String(d.warehouseNumber || '').trim();
-
-    let extendedFields = {};
-    let finalAddressLine = "невідома адреса";
-    let deliveryTitle = "Delivery";
-
-    if (deliveryType.includes('courier')) {
-        // КУР'ЄР
-        deliveryTitle = SHIPPING_TITLES.COURIER; 
+    // 6. ФОРМИРОВАНИЕ LINE ITEMS
+    const lineItems = murkitItems.map(item => {
+        const murkitCode = String(item.code).trim();
+        const wixSku = String(codeToSkuMap[murkitCode] || murkitCode); 
+        const wixId = wixSku ? skuToIdMap[wixSku] : null;
         
-        const addressParts = [];
-        if (street) addressParts.push(street);
-        if (house) addressParts.push(`буд. ${house}`);
-        if (flat) addressParts.push(`кв. ${flat}`);
-        
-        finalAddressLine = addressParts.length > 0 
-            ? addressParts.join(', ') 
-            : `Адресна доставка (${npCity})`;
+        const price = String(parseFloat(item.price || 0).toFixed(2));
 
-    } else {
-        // ВІДДІЛЕННЯ
-        deliveryTitle = SHIPPING_TITLES.BRANCH; 
-        
-        if (npWarehouse) {
-            finalAddressLine = `Нова Пошта №${npWarehouse}`;
-            extendedFields = {
-                "namespaces": {
-                    "_user_fields": {
-                        "nomer_viddilennya_poshtomatu_novoyi_poshti": npWarehouse
-                    }
-                }
-            };
-        } else {
-            finalAddressLine = "Нова Пошта (номер не указан)";
+        const baseItem = {
+            name: String(item.name || `Item ${murkitCode}`), 
+            quantity: parseInt(item.quantity || 1, 10),
+            price: {
+                amount: price,
+                currency: currency
+            },
+            
+            totalDiscount: {
+                amount: "0.00",
+                currency: currency
+            },
+            
+            physicalProperties: {
+                sku: wixSku || "N/A", 
+                shippable: true 
+            },
+            
+            customFields: [
+                { title: "SKU", value: wixSku },
+                { title: "Murkit Code", value: murkitCode }
+            ],
+            totalPriceBeforeTax: { amount: price, currency: currency },
+            totalPriceAfterTax: { amount: price, currency: currency },
+            lineItemPrice: { amount: price, currency: currency }
+        };
+
+        if (!wixId) {
+            console.warn(`Murkit Code ${murkitCode} (Wix SKU: ${wixSku}) not found in Wix, adding as custom item.`);
+            return baseItem; 
         }
-    }
 
+        return {
+            ...baseItem,
+            catalogReference: {
+                catalogItemId: wixId,
+                appId: "1380b703-ce81-ff05-f115-39571d94dfcd", // Wix Stores App ID
+            }
+        };
+    });
+
+    // 7. ФОРМИРОВАНИЕ TOTALS / PRICE SUMMARY
+    const priceSummaryPayload = {
+        subtotal: { amount: subtotalAmount, currency: currency },
+        shipping: { amount: "0.00", currency: currency },
+        tax: { amount: "0.00", currency: currency },
+        discount: { amount: "0.00", currency: currency },
+        total: { amount: totalAmount, currency: currency },
+    };
+    
+    // 8. Определение статуса оплаты
+    const isPaid = (murkitData.payment_status === 'paid' || 
+                    murkitData.paymentType === 'paid' || // <-- ДОБАВЛЕНО для вашей структуры
+                    (murkitData.paymentType && murkitData.paymentType.includes('mono')));
+    const paymentStatus = isPaid ? 'PAID' : 'NOT_PAID';
+
+
+    // 9. ФОРМИРОВАНИЕ ОБЪЕКТА ЗАКАЗА WIX
+    
+    // Адрес для Billing (Клиент)
+    const billingAddress = {
+        country: "UA",
+        city: String(murkitData.delivery?.settlementName || "Не вказано"),
+        addressLine: String("Телефон: " + clientPhone), 
+        email: defaultEmail,
+    };
+    
+    // Адрес для Shipping (Получатель)
     const shippingAddress = {
         country: "UA",
-        city: npCity || "City",
-        addressLine: finalAddressLine, 
-        postalCode: "00000"
+        city: String(murkitData.delivery?.settlementName || "Не вказано"),
+        addressLine: String(`НП №${murkitData.delivery?.warehouseNumber || "N/A"} (${murkitData.deliveryType || "N/A"})`),
     };
 
     const wixOrderPayload = {
         channelInfo: {
-            type: "OTHER_PLATFORM",
-            externalOrderId: murkitOrderId
+          type: "API",
+          externalId: murkitOrderId 
         },
-        status: "APPROVED",
+        
+        buyerInfo: { 
+            email: defaultEmail,
+        },
+        
         lineItems: lineItems,
-        priceSummary: priceSummary,
+        
+        priceSummary: priceSummaryPayload,
+        
         billingInfo: {
-            address: shippingAddress, 
-            contactDetails: {
-                firstName: clientName.firstName,
-                lastName: clientName.lastName,
-                phone: phone,
-                email: email
-            }
+          address: billingAddress,
+          contactDetails: {
+            firstName: clientName.firstName,
+            lastName: clientName.lastName,
+            phone: clientPhone,
+            company: "" 
+          }
         },
+
         shippingInfo: {
-            title: deliveryTitle,
+            title: String(`Доставка: ${murkitData.deliveryType || 'Не вказано'}`),
             logistics: {
                 shippingDestination: {
                     address: shippingAddress,
                     contactDetails: {
                         firstName: recipientName.firstName,
                         lastName: recipientName.lastName,
-                        phone: phone
+                        phone: murkitData.recipient?.phone || clientPhone,
+                        company: "" 
                     }
                 }
             },
-            cost: { price: { amount: "0.00", currency } }
+            cost: {
+                price: { amount: "0.00", currency: currency },
+            }
         },
-        buyerInfo: { email: email },
-        paymentStatus: (murkitData.payment_status === 'paid' || String(murkitData.paymentType || '').includes('paid')) ? "PAID" : "NOT_PAID",
+        
+        paymentStatus: paymentStatus,
         currency: currency,
-        weightUnit: "KG",
-        taxIncludedInPrices: false,
-        ...(Object.keys(extendedFields).length > 0 ? { extendedFields } : {})
+        
+        customFields: [
+            { title: "Murkit Order ID", value: murkitOrderId },
+            { title: "Тип доставки", value: String(murkitData.deliveryType || "Не вказано") },
+            { title: "Місто (НП)", value: String(murkitData.delivery?.settlementName || "Не вказано") },
+            { title: "Відділення НП", value: String(murkitData.delivery?.warehouseNumber || "Не вказано") },
+        ]
     };
 
+    // 10. Отправляем в Wix
     const createdOrder = await createWixOrder(wixOrderPayload);
-    
-    res.status(201).json({ 
-        "id": createdOrder.order?.id
+    console.log('Order created in Wix:', createdOrder.order?.id);
+
+    // 11. Отвечаем Murkit успешным статусом
+    res.status(200).json({ 
+        success: true, 
+        wix_order_id: createdOrder.order?.id 
     });
 
   } catch (e) {
-    console.error('Murkit Webhook Error:', e.message);
-    
-    const status = e.status || 500;
-    
-    // Кастомний формат відповіді для бізнес-помилок 409
-    if (status === 409 && (e.code === 'ITEM_NOT_FOUND' || e.code === 'ITEM_NOT_AVAILABLE')) {
-        return res.status(409).json({
-            message: e.message,
-            code: e.code
-        });
-    }
-
-    // Звичайний формат помилки
-    res.status(status).json({ 
-        error: e.message 
-    });
+    console.error('Error processing Murkit webhook:', e);
+    res.status(500).json({ error: e.message });
   }
 }
