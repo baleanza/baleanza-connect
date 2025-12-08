@@ -183,7 +183,8 @@ export default async function handler(req, res) {
                 resultSpan.className = "lookup-result";
 
                 try {
-                    const res = await fetch('/api/debug-order?id=' + encodeURIComponent(id));
+                    // ЗМІНА ТУТ: Використовуємо шлях /debug-order, згідно з vercel.json
+                    const res = await fetch('/debug-order?id=' + encodeURIComponent(id));
                     
                     // 1. Check response status to avoid HTML parsing errors
                     if (!res.ok) {
