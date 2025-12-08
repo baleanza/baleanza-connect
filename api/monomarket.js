@@ -240,7 +240,7 @@ export default async function handler(req, res) {
             }
         </script>
 
-        <h2>Monomarket Feed Table</h2>
+        <h2>Monomarket Product Table</h2>
         
         <div class="summary">
           Усього товарів у таблиці: ${tableData.length} <br>
