@@ -1,4 +1,4 @@
-import { createWixOrder, getProductsBySkus, findWixOrderByExternalId, adjustInventory } from '../lib/wixClient.js';
+import { createWixOrder, getProductsBySkus, findWixOrderByExternalId } from '../lib/wixClient.js';
 import { ensureAuth } from '../lib/sheetsClient.js'; 
 
 const WIX_STORES_APP_ID = "215238eb-22a5-4c36-9e7b-e7c08025e04e"; 
@@ -161,8 +161,6 @@ export default async function handler(req, res) {
 
     // 4. Line Items
     const lineItems = [];
-    // Масив для збору даних про коригування залишків
-    const adjustments = []; 
     
     for (const item of itemsWithSku) {
         const requestedQty = parseInt(item.quantity || 1, 10);
@@ -220,14 +218,6 @@ export default async function handler(req, res) {
         if (stockData.trackQuantity && (stockData.quantity < requestedQty)) {
              throw createError(409, `Product with code ${item.code} has not enough stock`, "ITEM_NOT_AVAILABLE");
         }
-
-        // === ЗБІР ДАНИХ ДЛЯ КОРИГУВАННЯ ЗАПАСІВ ===
-        adjustments.push({
-            productId: catalogItemId,
-            variantId: variantId, // null для простих товарів
-            quantity: requestedQty
-        });
-        // ==========================================
 
         // Картинка
         let imageObj = null;
@@ -378,17 +368,6 @@ export default async function handler(req, res) {
 
     const createdOrder = await createWixOrder(wixOrderPayload);
     
-    // === ЯВНЕ СПИСАННЯ ЗАПАСІВ ===
-    // Для виправлення багу, коли оплачені замовлення для прихованих товарів не списували сток.
-    if (adjustments.length > 0) {
-        try {
-            await adjustInventory(adjustments);
-        } catch (adjErr) {
-            console.error("Warning: Inventory adjustment failed, but order was created.", adjErr);
-            // Ми не кидаємо помилку далі, щоб не змушувати Murkit повторювати запит створення замовлення
-        }
-    }
-
     res.status(201).json({ 
         "id": createdOrder.order?.id
     });
