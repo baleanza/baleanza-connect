@@ -18,7 +18,31 @@ async function readSheetData(sheets, spreadsheetId) {
     };
 }
 
+
 export default async function handler(req, res) {
+  const AUTH_USER = process.env.MONOMARKET_USER;
+  const AUTH_PASS = process.env.MONOMARKET_PASSWORD;
+  
+  // Якщо облікові дані для захисту встановлені, активуємо перевірку
+  if (AUTH_USER && AUTH_PASS) {
+      const authHeader = req.headers.authorization;
+      
+      if (!authHeader || !authHeader.startsWith('Basic ')) {
+          // Надсилаємо заголовок, щоб викликати стандартне вікно входу в браузері
+          res.setHeader('WWW-Authenticate', 'Basic realm="Monomarket Private Area"');
+          return res.status(401).send('Unauthorized');
+      }
+
+      const b64Credentials = authHeader.split(' ')[1];
+      const credentials = Buffer.from(b64Credentials, 'base64').toString('utf-8');
+      const [user, pass] = credentials.split(':');
+
+      if (user !== AUTH_USER || pass !== AUTH_PASS) {
+          res.setHeader('WWW-Authenticate', 'Basic realm="Monomarket Private Area"');
+          return res.status(401).send('Invalid Credentials');
+      }
+  }
+
   try {
     const { sheets, spreadsheetId } = await ensureAuth();
 
