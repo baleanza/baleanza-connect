@@ -369,7 +369,7 @@ export default async function handler(req, res) {
     const createdOrder = await createWixOrder(wixOrderPayload);
     
     res.status(201).json({ 
-        "id": createdOrder.order?.id
+        "id": createdOrder.order?.number
     });
 
   } catch (e) {
