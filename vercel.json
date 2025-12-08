@@ -4,9 +4,10 @@
     { "src": "api/*.js", "use": "@vercel/node" }
   ],
   "routes": [
-    { "src": "/", "dest": "/api/check.js" }, 
+    { "src": "/", "dest": "/api/product-table.js" }, 
     
-    { "src": "/check", "dest": "/api/check.js" },
+    { "src": "/product-table", "dest": "/api/product-table.js" },
+    
     { "src": "/monomarket-offers", "dest": "/api/monomarket-offers.js" },
     { "src": "/monomarket-stock", "dest": "/api/monomarket-stock.js" },
     { "src": "/murkit-webhook", "dest": "/api/murkit-webhook.js" },
