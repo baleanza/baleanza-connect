@@ -99,7 +99,7 @@ export default async function handler(req, res) {
     const existingOrder = await findWixOrderByExternalId(murkitOrderId);
     if (existingOrder) {
         console.log(`Order #${murkitOrderId} already exists. ID: ${existingOrder.id}`);
-        return res.status(200).json({ "id": existingOrder.number });
+        return res.status(200).json({ "id": existingOrder.id });
     }
 
     // === ВАЛІДАЦІЯ ТОВАРІВ ===
@@ -369,7 +369,7 @@ export default async function handler(req, res) {
     const createdOrder = await createWixOrder(wixOrderPayload);
     
     res.status(201).json({ 
-        "id": createdOrder.order?.number
+        "id": createdOrder.order?.id
     });
 
   } catch (e) {
