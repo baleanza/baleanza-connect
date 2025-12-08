@@ -1,8 +1,7 @@
-// api/check.js
 import { ensureAuth, cleanPrice } from '../lib/sheetsClient.js'; 
 import { getInventoryBySkus } from '../lib/wixClient.js';
 
-// readSheetData вынесен из handler, так как он использует sheets
+// Чтение данных из Google Sheets
 async function readSheetData(sheets, spreadsheetId) {
     const importRes = await sheets.spreadsheets.values.get({
         spreadsheetId,
@@ -20,7 +19,6 @@ async function readSheetData(sheets, spreadsheetId) {
 
 export default async function handler(req, res) {
   try {
-    // Авторизация Google Sheets
     const { sheets, spreadsheetId } = await ensureAuth();
 
     const { importValues, controlValues } = await readSheetData(
@@ -35,13 +33,10 @@ export default async function handler(req, res) {
     const headers = importValues[0];
     const dataRows = importValues.slice(1);
     
+    // Парсим настройки фида, чтобы найти соответствие колонок
     const controlHeaders = controlValues[0] || [];
     const idxImportField = controlHeaders.indexOf('Import field');
     const idxFeedName = controlHeaders.indexOf('Feed name');
-
-    let colSku = -1;
-    let colName = -1;
-    let colPrice = -1;
 
     const fieldMap = {}; 
     controlValues.slice(1).forEach(row => {
@@ -52,17 +47,29 @@ export default async function handler(req, res) {
       }
     });
 
-    const nameKeys = [fieldMap['name'], fieldMap['title'], 'Name', 'Title'].filter(Boolean);
+    // --- ОПРЕДЕЛЕНИЕ ИНДЕКСОВ КОЛОНОК ---
     
+    // 1. Ищем колонку Name/Title
+    let colName = -1;
+    const nameKeys = [fieldMap['name'], fieldMap['title'], 'Name', 'Title'].filter(Boolean);
     for (const key of nameKeys) {
       colName = headers.indexOf(key);
       if (colName > -1) break;
     }
 
-    colSku = headers.indexOf(fieldMap['sku'] || 'SKU'); 
-    colPrice = headers.indexOf(fieldMap['price'] || 'Price');
+    // 2. Ищем колонку SKU (для связи с Wix)
+    const colSku = headers.indexOf(fieldMap['sku'] || 'SKU'); 
+    
+    // 3. Ищем колонку Price
+    const colPrice = headers.indexOf(fieldMap['price'] || 'Price');
 
-    if (colSku === -1) return res.status(500).send('<h1>Помилка: Не знайдено колонку SKU</h1>');
+    // 4. Ищем колонку Code (Product ID для вывода в начале)
+    // Если в маппинге нет 'code', пробуем искать по имени заголовка 'code' или берем SKU как фоллбэк
+    let colCode = headers.indexOf(fieldMap['code']);
+    if (colCode === -1) colCode = headers.indexOf('code');
+    // Если все еще нет, можно оставить пустым или дублировать SKU. Оставим пустым, если не найдено.
+
+    if (colSku === -1) return res.status(500).send('<h1>Помилка: Не знайдено колонку SKU для синхронізації</h1>');
 
     const skus = [];
     const tableData = [];
@@ -74,15 +81,18 @@ export default async function handler(req, res) {
       skus.push(sku);
       
       const priceVal = colPrice > -1 ? row[colPrice] : '0';
+      const codeVal = colCode > -1 ? (row[colCode] || '') : ''; // Значение Product ID
       
       tableData.push({
         sku: sku,
+        code: codeVal, // Добавляем code в объект данных
         name: colName > -1 ? row[colName] : '(Без назви)',
         priceRaw: priceVal,
         price: cleanPrice(priceVal)
       });
     });
 
+    // Запрашиваем остатки из Wix
     const inventory = await getInventoryBySkus(skus);
     
     const stockMap = {};
@@ -93,7 +103,7 @@ export default async function handler(req, res) {
     let html = `
     <html>
       <head>
-        <title>Перевірка залишків</title>
+        <title>Product Table</title>
         <meta charset="UTF-8">
         <style>
           body { font-family: sans-serif; padding: 20px; }
@@ -105,28 +115,20 @@ export default async function handler(req, res) {
           .warn { background-color: #fff3cd; color: #856404; }
           h2 { margin-bottom: 5px; }
           .summary { margin-bottom: 20px; font-size: 14px; color: #666; }
-          .legend div { margin-bottom: 5px; padding: 5px; border-radius: 4px; }
         </style>
       </head>
       <body>
-        <h2>Перевірка товарів та залишків</h2>
+        <h2>Product Table</h2>
         
         <div class="summary">
           Усього товарів у таблиці: ${tableData.length} <br>
           Зібрано залишків з Wix: ${inventory.length}
         </div>
 
-        <h3>Легенда</h3>
-        <div class="legend">
-            <div class="instock">✅ **В НАЯВНОСТІ** — Товар знайдено у Wix і має позитивний залишок.</div>
-            <div class="outstock">❌ **НЕМАЄ В НАЯВНОСТІ** — Товар знайдено у Wix, але його залишок дорівнює 0.</div>
-            <div class="warn">⚠️ **НЕ ЗНАЙДЕНО В WIX** — Артикул є в Google Таблиці, але Wix не повернув його (опечатка в SKU або товар не існує).</div>
-        </div>
-
         <table>
           <thead>
             <tr>
-              <th>Артикул (SKU)</th>
+              <th>Product ID</th> <th>Артикул (SKU)</th>
               <th>Назва</th>
               <th>Ціна (Sheet)</th>
               <th>Наявність (Wix)</th>
@@ -158,7 +160,7 @@ export default async function handler(req, res) {
 
       html += `
         <tr>
-          <td>${item.sku}</td>
+          <td>${item.code}</td> <td>${item.sku}</td>
           <td>${item.name}</td>
           <td>${item.price.toFixed(2)} ₴</td>
           <td class="${stockClass}">${stockText}</td>
