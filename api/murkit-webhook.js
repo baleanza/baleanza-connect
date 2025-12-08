@@ -137,21 +137,21 @@ export default async function handler(req, res) {
             };
         }
 
-        // Поиск Варианта и его Опций
+        // Поиск Варианта и его Опций (без изменения имени)
+        let descriptionLines = [];
+        
         if (String(productMatch.sku) !== targetSku && productMatch.variants) {
             const variantMatch = productMatch.variants.find(v => String(v.variant?.sku) === targetSku);
             if (variantMatch) {
                 variantId = variantMatch.variant.id; 
                 stockData = variantMatch.stock; 
                 
-                // === ИСПРАВЛЕНИЕ 1: ДОПИСЫВАЕМ ОПЦИИ В НАЗВАНИЕ ===
-                // Если есть choices (Размер: L, Цвет: Черный), добавляем их к имени
-                // Это гарантирует, что кладовщик увидит вариант
+                // Формируем descriptionLines (для технического отображения опций, если Wix позволит)
                 if (variantMatch.variant.choices) {
-                    const opts = Object.values(variantMatch.variant.choices).join(' / ');
-                    if (opts) {
-                        productName = `${productName} (${opts})`;
-                    }
+                     descriptionLines = Object.entries(variantMatch.variant.choices).map(([optName, optValue]) => ({
+                        name: { original: optName, translated: optName },
+                        plainText: { original: optValue, translated: optValue }
+                    }));
                 }
             }
         }
@@ -174,147 +174,5 @@ export default async function handler(req, res) {
         const lineItem = {
             quantity: requestedQty,
             catalogReference: catalogRef,
-            productName: { original: productName }, // Имя теперь содержит опции
-            itemType: { preset: "PHYSICAL" },
-            physicalProperties: { sku: targetSku, shippable: true },
-            price: { amount: fmtPrice(item.price) },
-            taxDetails: { taxRate: "0", totalTax: { amount: "0.00", currency: currency } }
-        };
-
-        if (imageObj) {
-            lineItem.image = imageObj;
-        }
-
-        lineItems.push(lineItem);
-    }
-
-    // 5. Order Data Preparation
-    const clientName = getFullName(murkitData.client?.name);
-    const recipientName = getFullName(murkitData.recipient?.name);
-    const phone = String(murkitData.client?.phone || murkitData.recipient?.phone || "").replace(/\D/g,'');
-    const email = murkitData.client?.email || "monomarket@mywoodmood.com";
-
-    const priceSummary = {
-        subtotal: { amount: fmtPrice(murkitData.sum), currency },
-        shipping: { amount: "0.00", currency }, 
-        tax: { amount: "0.00", currency },
-        discount: { amount: "0.00", currency },
-        total: { amount: fmtPrice(murkitData.sum), currency }
-    };
-
-    // === ЛОГИКА ДОСТАВКИ (ИСПРАВЛЕНА ДЛЯ КУРЬЕРА) ===
-    const d = murkitData.delivery || {}; // Удобная ссылка на объект доставки
-    const deliveryType = String(murkitData.deliveryType || '');
-    
-    // Поля для курьера
-    const npCity = String(d.settlement || d.city || d.settlementName || '').trim();
-    const street = String(d.address || '').trim(); // Тут только улица!
-    const house = String(d.house || '').trim();
-    const flat = String(d.flat || '').trim();
-
-    // Поля для отделения
-    const npWarehouse = String(d.warehouseNumber || '').trim();
-
-    let extendedFields = {};
-    let finalAddressLine = "невідома адреса";
-    let deliveryTitle = "Delivery";
-
-    if (deliveryType.includes('courier')) {
-        // === СЦЕНАРИЙ 1: КУРЬЕР ===
-        deliveryTitle = SHIPPING_TITLES.COURIER; 
-        
-        // Склеиваем полный адрес
-        // Пример: "вул. Квітнева, буд. 1024, кв. 5"
-        const addressParts = [];
-        if (street) addressParts.push(street);
-        if (house) addressParts.push(`буд. ${house}`);
-        if (flat) addressParts.push(`кв. ${flat}`);
-        
-        finalAddressLine = addressParts.length > 0 
-            ? addressParts.join(', ') 
-            : `Адресна доставка (${npCity})`;
-
-    } else {
-        // === СЦЕНАРИЙ 2: ОТДЕЛЕНИЕ / ПОЧТОМАТ ===
-        deliveryTitle = SHIPPING_TITLES.BRANCH; 
-        if (npWarehouse) {
-            finalAddressLine = `Нова Пошта №${npWarehouse}`;
-            extendedFields = {
-                "namespaces": {
-                    "_user_fields": {
-                        "nomer_viddilennya_poshtomatu_novoyi_poshti": npWarehouse
-                    }
-                }
-            };
-        } else {
-            finalAddressLine = "Нова Пошта (номер не указан)";
-        }
-    }
-
-    const shippingAddress = {
-        country: "UA",
-        city: npCity || "City",
-        addressLine: finalAddressLine, 
-        postalCode: "00000"
-    };
-
-    const wixOrderPayload = {
-        channelInfo: {
-            type: "OTHER_PLATFORM",
-            externalOrderId: String(murkitData.number)
-        },
-        // Теги закомментированы, чтобы не было ошибки "Expected an object"
-        // tags: ["Monomarket"], 
-        
-        status: "APPROVED",
-        lineItems: lineItems,
-        priceSummary: priceSummary,
-        billingInfo: {
-            address: shippingAddress, 
-            contactDetails: {
-                firstName: clientName.firstName,
-                lastName: clientName.lastName,
-                phone: phone,
-                email: email
-            }
-        },
-        shippingInfo: {
-            title: deliveryTitle,
-            logistics: {
-                shippingDestination: {
-                    address: shippingAddress,
-                    contactDetails: {
-                        firstName: recipientName.firstName,
-                        lastName: recipientName.lastName,
-                        phone: phone
-                    }
-                }
-            },
-            cost: { price: { amount: "0.00", currency } }
-        },
-        buyerInfo: { email: email },
-        paymentStatus: (murkitData.payment_status === 'paid' || String(murkitData.paymentType || '').includes('paid')) ? "PAID" : "NOT_PAID",
-        currency: currency,
-        weightUnit: "KG",
-        taxIncludedInPrices: false,
-        ...(Object.keys(extendedFields).length > 0 ? { extendedFields } : {})
-    };
-
-    debugPayload = wixOrderPayload;
-
-    const createdOrder = await createWixOrder(wixOrderPayload);
-    
-    res.status(200).json({ 
-        success: true, 
-        wix_order_id: createdOrder.order?.id,
-        murkit_number: murkitData.number
-    });
-
-  } catch (e) {
-    console.error('Murkit Webhook Error:', e.message);
-    res.status(500).json({ 
-        error: e.message,
-        debug_payload_sent_to_wix: debugPayload 
-    });
-  }
-}
+            productName: { original: productName }, // Имя товара БЕЗ добавок
+            descriptionLines: descriptionLines,
