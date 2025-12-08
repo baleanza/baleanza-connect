@@ -137,9 +137,6 @@ export default async function handler(req, res) {
             };
         }
 
-        // Массив для опций (цвет, размер)
-        let descriptionLines = [];
-
         // Поиск Варианта и его Опций
         if (String(productMatch.sku) !== targetSku && productMatch.variants) {
             const variantMatch = productMatch.variants.find(v => String(v.variant?.sku) === targetSku);
@@ -147,20 +144,14 @@ export default async function handler(req, res) {
                 variantId = variantMatch.variant.id; 
                 stockData = variantMatch.stock; 
                 
-                // === ИЗМЕНЕНИЕ: Формируем descriptionLines (ВАЖНО!) ===
+                // === ИСПРАВЛЕНИЕ 1: ДОПИСЫВАЕМ ОПЦИИ В НАЗВАНИЕ ===
+                // Если есть choices (Размер: L, Цвет: Черный), добавляем их к имени
+                // Это гарантирует, что кладовщик увидит вариант
                 if (variantMatch.variant.choices) {
-                    // Wix ожидает структуру: 
-                    // { name: { original: "Color", translated: "Color" }, plainText: { original: "Red", translated: "Red" } }
-                    descriptionLines = Object.entries(variantMatch.variant.choices).map(([optName, optValue]) => ({
-                        name: { 
-                            original: optName, 
-                            translated: optName 
-                        },
-                        plainText: { 
-                            original: optValue, 
-                            translated: optValue 
-                        }
-                    }));
+                    const opts = Object.values(variantMatch.variant.choices).join(' / ');
+                    if (opts) {
+                        productName = `${productName} (${opts})`;
+                    }
                 }
             }
         }
@@ -183,9 +174,7 @@ export default async function handler(req, res) {
         const lineItem = {
             quantity: requestedQty,
             catalogReference: catalogRef,
-            productName: { original: productName },
-            // Передаем опции в descriptionLines
-            descriptionLines: descriptionLines,
+            productName: { original: productName }, // Имя теперь содержит опции
             itemType: { preset: "PHYSICAL" },
             physicalProperties: { sku: targetSku, shippable: true },
             price: { amount: fmtPrice(item.price) },
@@ -213,20 +202,40 @@ export default async function handler(req, res) {
         total: { amount: fmtPrice(murkitData.sum), currency }
     };
 
-    // === ЛОГИКА ДОСТАВКИ ===
+    // === ЛОГИКА ДОСТАВКИ (ИСПРАВЛЕНА ДЛЯ КУРЬЕРА) ===
+    const d = murkitData.delivery || {}; // Удобная ссылка на объект доставки
     const deliveryType = String(murkitData.deliveryType || '');
-    const npWarehouse = String(murkitData.delivery?.warehouseNumber || '').trim();
-    const npCity = String(murkitData.delivery?.settlementName || '').trim();
-    const npStreet = String(murkitData.delivery?.address || '').trim();
+    
+    // Поля для курьера
+    const npCity = String(d.settlement || d.city || d.settlementName || '').trim();
+    const street = String(d.address || '').trim(); // Тут только улица!
+    const house = String(d.house || '').trim();
+    const flat = String(d.flat || '').trim();
+
+    // Поля для отделения
+    const npWarehouse = String(d.warehouseNumber || '').trim();
 
     let extendedFields = {};
     let finalAddressLine = "невідома адреса";
     let deliveryTitle = "Delivery";
 
     if (deliveryType.includes('courier')) {
+        // === СЦЕНАРИЙ 1: КУРЬЕР ===
         deliveryTitle = SHIPPING_TITLES.COURIER; 
-        finalAddressLine = npStreet ? `${npStreet}` : `Адресная доставка (нет данных улицы)`;
+        
+        // Склеиваем полный адрес
+        // Пример: "вул. Квітнева, буд. 1024, кв. 5"
+        const addressParts = [];
+        if (street) addressParts.push(street);
+        if (house) addressParts.push(`буд. ${house}`);
+        if (flat) addressParts.push(`кв. ${flat}`);
+        
+        finalAddressLine = addressParts.length > 0 
+            ? addressParts.join(', ') 
+            : `Адресна доставка (${npCity})`;
+
     } else {
+        // === СЦЕНАРИЙ 2: ОТДЕЛЕНИЕ / ПОЧТОМАТ ===
         deliveryTitle = SHIPPING_TITLES.BRANCH; 
         if (npWarehouse) {
             finalAddressLine = `Нова Пошта №${npWarehouse}`;
@@ -254,7 +263,8 @@ export default async function handler(req, res) {
             type: "OTHER_PLATFORM",
             externalOrderId: String(murkitData.number)
         },
-        // УБРАЛ TAGS, ЧТОБЫ УБРАТЬ ОШИБКУ "Expected an object"
+        // Теги закомментированы, чтобы не было ошибки "Expected an object"
+        // tags: ["Monomarket"], 
         
         status: "APPROVED",
         lineItems: lineItems,
