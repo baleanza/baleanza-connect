@@ -46,27 +46,40 @@ function checkAuth(req) {
   return login === process.env.MURKIT_USER && password === process.env.MURKIT_PASS;
 }
 
-// readSheetData (EXISTING)
-// FIX: Enhanced for robustness against API errors and older JS environments 
-// to prevent "Cannot read properties of undefined (reading 'values')" error.
+// readSheetData (FINAL FIX for "Cannot read properties of undefined")
+// FIX: Enhanced for robustness against intermittent API errors/timeouts 
+// when called within the complex order handler.
 async function readSheetData(sheets, spreadsheetId) {
     let importRes, controlRes;
     
+    // Log for debugging start
+    console.log('Sheets: Starting fetch for Import and Feed Control Lists.');
+    
     try {
+        // Fetch both sheets concurrently
         [importRes, controlRes] = await Promise.all([
             sheets.spreadsheets.values.get({ spreadsheetId, range: 'Import!A1:ZZ' }),
             sheets.spreadsheets.values.get({ spreadsheetId, range: 'Feed Control List!A1:F' }),
         ]);
+        
     } catch (e) {
-        // If Promise.all fails due to Auth/API issues, we re-throw a more informative error
-        throw createError(500, `Failed to fetch data from Google Sheets: ${e.message}`, "SHEETS_API_ERROR");
+        // If Promise.all fails due to Auth/API issues, we log the failure and throw
+        console.error('Sheets API Call FAILED (Caught in readSheetData):', e.message);
+        throw createError(500, `Failed to fetch data from Google Sheets (API ERROR): ${e.message}`, "SHEETS_API_ERROR");
     }
 
-    // Safely access data using traditional checks (compatible with older Node.js runtimes)
-    // This prevents the "Cannot read properties of undefined" error if the response object is malformed
+    // Safely access data, preventing the "Cannot read properties of undefined (reading 'values')" error
     const importValues = (importRes && importRes.data && importRes.data.values) ? importRes.data.values : [];
     const controlValues = (controlRes && controlRes.data && controlRes.data.values) ? controlRes.data.values : [];
-
+    
+    // CRITICAL CHECK: If data is unexpectedly empty, treat it as an error
+    if (importValues.length === 0 || controlValues.length === 0) {
+        // This suggests the API succeeded but returned no data, potentially a permission issue for that specific range
+        throw createError(500, 'Sheets: Empty or invalid data retrieved from critical sheets (check data ranges and sheet names).', "SHEETS_DATA_EMPTY");
+    }
+    
+    console.log('Sheets: Data fetched successfully.');
+    
     return { 
         importValues: importValues, 
         controlValues: controlValues 
@@ -551,7 +564,7 @@ export default async function handler(req, res) {
             });
 
         } catch (e) {
-            console.error('Murkit Webhook Error:', e.message);
+            console.error('Murkit Webhook Error (Order Creation Final Catch):', e.message);
             
             const status = e.status || 500;
             
