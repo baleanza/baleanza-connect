@@ -11,7 +11,7 @@
     { "source": "/debug-wix", "destination": "/api/debug-wix.js" },
     { "source": "/debug-order", "destination": "/api/debug-order.js" },
     { "source": "/monomarket-endpoint", "destination": "/api/monomarket-endpoint.js" },
-    { "source": "/monomarket-endpoint/orders/:path*", "destination": "/api/monomarket-endpoint.js" }
+    { "source": "/monomarket-endpoint/orders/:path*", "destination": "/api/monomarket-endpoint.js" },
     { "source": "/debug-fulfillment/:wixId", "destination": "/api/debug-fulfillment.js" }
 ]
 }
