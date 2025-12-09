@@ -3,17 +3,15 @@
   "builds": [
     { "src": "api/*.js", "use": "@vercel/node" }
   ],
-  "routes": [
-    { "src": "/", "dest": "/api/monomarket.js" },
-    { "src": "/monomarket", "dest": "/api/monomarket.js" },
-    
-    { "src": "/monomarket-offers", "dest": "/api/monomarket-offers.js" },
-    { "src": "/monomarket-stock", "dest": "/api/monomarket-stock.js" },
-    
-    { "src": "/debug-wix", "dest": "/api/debug-wix.js" },
-    { "src": "/debug-order", "dest": "/api/debug-order.js" }
-  ],
   "rewrites": [
+    { "source": "/", "destination": "/api/monomarket.js" },
+    { "source": "/monomarket", "destination": "/api/monomarket.js" },
+    { "source": "/monomarket-offers", "destination": "/api/monomarket-offers.js" },
+    { "source": "/monomarket-stock", "destination": "/api/monomarket-stock.js" },
+    { "source": "/debug-wix", "destination": "/api/debug-wix.js" },
+    { "source": "/debug-order", "destination": "/api/debug-order.js" },
+
+    // Динамічні маршрути для Murkit (нормалізовано)
     { "source": "/monomarket-endpoint", "destination": "/api/monomarket-endpoint.js" },
     { "source": "/monomarket-endpoint/orders/:path*", "destination": "/api/monomarket-endpoint.js" }
   ]
