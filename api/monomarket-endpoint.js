@@ -559,7 +559,7 @@ export default async function handler(req, res) {
             }
 
             res.status(201).json({ 
-                "id": createdOrder.order?.number 
+                "id": createdOrder.order?.id 
             });
 
         } catch (e) {
