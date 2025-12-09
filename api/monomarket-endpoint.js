@@ -1,9 +1,12 @@
 import { 
     createWixOrder, 
     getProductsBySkus, 
+    // Для дедуплікації (пошук за Murkit ID)
     findWixOrderByExternalId, 
+    // Для статусу/скасування (пошук за Wix ID)
+    findWixOrderById, 
     getWixOrderFulfillments, 
-    cancelWixOrderByExternalId 
+    cancelWixOrderById
 } from '../lib/wixClient.js'; 
 import { ensureAuth } from '../lib/sheetsClient.js'; 
 
@@ -16,7 +19,6 @@ const MURKIT_TO_WIX_CREATION_MAPPING = {
 };
 
 // === МАПІНГ ДЛЯ ОТРИМАННЯ СТАТУСУ (Wix Title -> Murkit Output) ===
-// Враховує, що "НП Відділення" та "НП Поштомат" мапляться в "nova-post"
 const WIX_TO_MURKIT_STATUS_MAPPING = {
     "НП Відділення": "nova-post", 
     "НП Кур'єр": "courier-nova-post",
@@ -136,13 +138,12 @@ function mapWixOrderToMurkitResponse(wixOrder, fulfillments, externalId) {
     // 4. Мапінг способу доставки та TTN (Тільки якщо статус 'sent' і є TTN)
     const normalizedShippingLine = wixShippingLine.trim();
     if (murkitStatus === 'sent' && ttn) {
-        // Використовуємо WIX_TO_MURKIT_STATUS_MAPPING для зворотного мапінгу
         shipmentType = WIX_TO_MURKIT_STATUS_MAPPING[normalizedShippingLine] || 'nova-post'; 
         shipment = { ttn: ttn };
     }
     
     return {
-        id: externalId,
+        id: externalId, // Тут ми повертаємо Wix ID (який Murkit надіслав)
         status: murkitStatus,
         cancelStatus: murkitCancelStatus,
         shipmentType: shipmentType,
@@ -162,10 +163,11 @@ export default async function handler(req, res) {
     // --- 1. PUT Cancel Order Endpoint ---
     const cancelOrderPathMatch = urlPath.match(/\/orders\/([^/]+)\/cancel$/);
     if (req.method === 'PUT' && cancelOrderPathMatch) {
-        const murkitOrderId = cancelOrderPathMatch[1]; 
+        // Wix Order ID
+        const wixOrderId = cancelOrderPathMatch[1]; 
 
         try {
-            const cancelResult = await cancelWixOrderByExternalId(murkitOrderId);
+            const cancelResult = await cancelWixOrderById(wixOrderId);
 
             if (cancelResult.status === 404) {
                  return res.status(404).json({ message: 'Order does not exist', code: 'NOT_FOUND' });
@@ -183,14 +185,16 @@ export default async function handler(req, res) {
             }
             
             if (cancelResult.status === 200) {
-                const wixOrder = await findWixOrderByExternalId(murkitOrderId);
-                const fulfillments = await getWixOrderFulfillments(cancelResult.wixOrderId);
+                // Пошук за Wix ID
+                const wixOrder = await findWixOrderById(wixOrderId);
+                const fulfillments = await getWixOrderFulfillments(wixOrderId);
                 
                 if (!wixOrder) {
                      return res.status(500).json({ message: 'Internal server error: Order status not found after successful cancellation request', code: 'INTERNAL_ERROR' });
                 }
                 
-                const murkitResponse = mapWixOrderToMurkitResponse(wixOrder, fulfillments, murkitOrderId);
+                // В Murkit response ID має бути Wix ID
+                const murkitResponse = mapWixOrderToMurkitResponse(wixOrder, fulfillments, wixOrderId);
                 return res.status(200).json(murkitResponse);
             }
 
@@ -203,18 +207,21 @@ export default async function handler(req, res) {
     // --- 2. GET Order Endpoint (Отримання статусу одного замовлення) ---
     const singleOrderPathMatch = urlPath.match(/\/orders\/([^/]+)$/);
     if (req.method === 'GET' && singleOrderPathMatch) {
-        const murkitOrderId = singleOrderPathMatch[1];
+        // Wix Order ID
+        const wixOrderId = singleOrderPathMatch[1];
 
         try {
-            const wixOrder = await findWixOrderByExternalId(murkitOrderId);
+            // Пошук за Wix ID
+            const wixOrder = await findWixOrderById(wixOrderId);
 
             if (!wixOrder) {
                 return res.status(404).json({ message: 'Order does not exist', code: 'NOT_FOUND' });
             }
             
-            const fulfillments = await getWixOrderFulfillments(wixOrder.id);
+            const fulfillments = await getWixOrderFulfillments(wixOrderId);
 
-            const murkitResponse = mapWixOrderToMurkitResponse(wixOrder, fulfillments, murkitOrderId);
+            // В Murkit response ID має бути Wix ID
+            const murkitResponse = mapWixOrderToMurkitResponse(wixOrder, fulfillments, wixOrderId);
             return res.status(200).json(murkitResponse);
 
         } catch (error) {
@@ -225,7 +232,7 @@ export default async function handler(req, res) {
 
     // --- 3. POST Order Batch Endpoint (Отримання статусу кількох замовлень) ---
     if (req.method === 'POST' && urlPath.includes('/orders/batch')) {
-        let orderIds;
+        let orderIds; // Wix Order IDs
         try {
             orderIds = req.body && req.body.orders;
             if (!Array.isArray(orderIds) || orderIds.length === 0) {
@@ -238,20 +245,21 @@ export default async function handler(req, res) {
         const responses = [];
         const errors = [];
         
-        await Promise.all(orderIds.map(async (murkitOrderId) => {
+        await Promise.all(orderIds.map(async (wixOrderId) => {
             try {
-                const wixOrder = await findWixOrderByExternalId(murkitOrderId);
+                // Пошук за Wix ID
+                const wixOrder = await findWixOrderById(wixOrderId);
 
                 if (!wixOrder) {
-                    errors.push({ id: murkitOrderId, message: 'Order does not exist', code: 'NOT_FOUND' });
+                    errors.push({ id: wixOrderId, message: 'Order does not exist', code: 'NOT_FOUND' });
                 } else {
-                    const fulfillments = await getWixOrderFulfillments(wixOrder.id);
-                    responses.push(mapWixOrderToMurkitResponse(wixOrder, fulfillments, murkitOrderId));
+                    const fulfillments = await getWixOrderFulfillments(wixOrderId);
+                    responses.push(mapWixOrderToMurkitResponse(wixOrder, fulfillments, wixOrderId));
                 }
 
             } catch (error) {
-                console.error(`POST Order Batch Error for ID ${murkitOrderId}:`, error);
-                errors.push({ id: murkitOrderId, message: 'Internal server error while fetching order status', code: 'INTERNAL_ERROR' });
+                console.error(`POST Order Batch Error for ID ${wixOrderId}:`, error);
+                errors.push({ id: wixOrderId, message: 'Internal server error while fetching order status', code: 'INTERNAL_ERROR' });
             }
         }));
 
@@ -273,10 +281,11 @@ export default async function handler(req, res) {
             console.log(`Processing Murkit Order #${murkitOrderId}`);
 
             // === КРОК 0: ДЕДУПЛІКАЦІЯ ===
+            // ТУТ ШУКАЄМО ЗА Murkit ID
             const existingOrder = await findWixOrderByExternalId(murkitOrderId);
             if (existingOrder) {
                 console.log(`Order #${murkitOrderId} already exists. ID: ${existingOrder.id}`);
-                // Повертаємо 200 зі знайденим ID
+                // Повертаємо Wix ID
                 return res.status(200).json({ "id": existingOrder.id });
             }
 
@@ -422,12 +431,10 @@ export default async function handler(req, res) {
                 total: { amount: fmtPrice(murkitData.sum), currency }
             };
 
-            // === ЛОГІКА ДОСТАВКИ (ОНОВЛЕНО) ===
+            // === ЛОГІКА ДОСТАВКИ ===
             const d = murkitData.delivery || {}; 
-            // Ключ - це рядок "nova-post" або "courier-nova-post"
             const deliveryTypeKey = String(murkitData.deliveryType || 'nova-post').toLowerCase(); 
             
-            // Використовуємо мапінг для встановлення коректної Wix назви
             const deliveryTitle = MURKIT_TO_WIX_CREATION_MAPPING[deliveryTypeKey] || "Delivery"; 
 
             const npCity = String(d.settlement || d.city || d.settlementName || '').trim();
@@ -457,7 +464,6 @@ export default async function handler(req, res) {
                     extendedFields = {
                         "namespaces": {
                             "_user_fields": {
-                                // Використовуємо поле для номера відділення/поштомату
                                 "nomer_viddilennya_poshtomatu_novoyi_poshti": npWarehouse
                             }
                         }
@@ -477,7 +483,7 @@ export default async function handler(req, res) {
             const wixOrderPayload = {
                 channelInfo: {
                     type: "OTHER_PLATFORM",
-                    externalOrderId: murkitOrderId
+                    externalOrderId: murkitOrderId // Зберігаємо Murkit ID тут
                 },
                 status: "APPROVED",
                 lineItems: lineItems,
@@ -492,7 +498,7 @@ export default async function handler(req, res) {
                     }
                 },
                 shippingInfo: {
-                    title: deliveryTitle, // ВИКОРИСТОВУЄМО ОНОВЛЕНИЙ deliveryTitle
+                    title: deliveryTitle,
                     logistics: {
                         shippingDestination: {
                             address: shippingAddress,
@@ -515,6 +521,7 @@ export default async function handler(req, res) {
 
             const createdOrder = await createWixOrder(wixOrderPayload);
             
+            // ПОВЕРТАЄМО НАШ ID (WIX ID)
             return res.status(201).json({ 
                 "id": createdOrder.order?.id
             });
