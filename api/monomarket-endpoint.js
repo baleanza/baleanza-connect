@@ -346,7 +346,8 @@ export default async function handler(req, res) {
 
             // 1. Sheets (FIXED implementation of readSheetData is used here)
             const { sheets, spreadsheetId } = await ensureAuth(); 
-            const { importValues, controlValues } = await readSheetData(sheets, process.env.SHEETS_ID);
+            // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Используем переменную spreadsheetId, полученную из ensureAuth()
+            const { importValues, controlValues } = await readSheetData(sheets, spreadsheetId);
             const codeToSkuMap = getProductSkuMap(importValues, controlValues);
             
             // 2. Resolve SKUs
