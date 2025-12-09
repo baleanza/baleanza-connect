@@ -1,31 +1,31 @@
 import { 
     createWixOrder, 
     getProductsBySkus, 
-    // For deduplication (search by Murkit ID)
     findWixOrderByExternalId, 
-    // For status/cancellation (search by Wix ID)
+    // New functions for GET/PUT/POST batch
     findWixOrderById, 
     getWixOrderFulfillments, 
-    cancelWixOrderById
-} from '../lib/wixClient.js'; 
+    cancelWixOrderById,
+    // Restored: adjustInventory was present in the old working code
+    adjustInventory 
+} from '../lib/wixClient.js';
 import { ensureAuth } from '../lib/sheetsClient.js'; 
 
 const WIX_STORES_APP_ID = "215238eb-22a5-4c36-9e7b-e7c08025e04e"; 
 
-// === MAPPING FOR ORDER CREATION (Murkit Input -> Wix Title) ===
-const MURKIT_TO_WIX_CREATION_MAPPING = {
-    "nova-post": "НП Відділення", // Standard for branches and postamats
-    "courier-nova-post": "НП Кур'єр"
+// === НАЛАШТУВАННЯ НАЗВ ДОСТАВКИ (для создания заказа) ===
+const SHIPPING_TITLES = {
+    BRANCH: "НП Відділення",  
+    COURIER: "НП Кур'єр"
 };
 
-// === MAPPING FOR STATUS RETRIEVAL (Wix Title -> Murkit Output) ===
+// === MAPPING FOR STATUS RETRIEVAL (для получения статуса) ===
 const WIX_TO_MURKIT_STATUS_MAPPING = {
     "НП Відділення": "nova-post", 
     "НП Кур'єр": "courier-nova-post",
     "НП Поштомат": "nova-post"
 };
 
-// === EXISTING HELPER FUNCTIONS ===
 function createError(status, message, code = null) {
     const err = new Error(message);
     err.status = status;
@@ -46,23 +46,22 @@ function checkAuth(req) {
   return login === process.env.MURKIT_USER && password === process.env.MURKIT_PASS;
 }
 
-// readSheetData (FINAL FIX: Changed from Promise.all to Sequential Fetching)
+// readSheetData (ФИНАЛЬНЫЙ FIX: Используем ТОЛЬКО последовательное чтение с усиленными проверками)
 async function readSheetData(sheets, spreadsheetId) {
     let importRes, controlRes;
     
     console.log('Sheets: Starting SEQUENTIAL fetch for Import and Feed Control Lists.');
     
     try {
-        // FIX: Fetch 1: Import List (Sequential call)
+        // FIX: Fetch 1: Import List (Sequential call, restored original successful logic)
         importRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Import!A1:ZZ' });
         
-        // FIX: Fetch 2: Control List (Sequential call)
+        // FIX: Fetch 2: Control List (Sequential call, restored original successful logic)
         controlRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Feed Control List!A1:F' });
         
     } catch (e) {
-        // Log the full error from the sequential attempts
+        // Логируем полную ошибку, чтобы помочь с диагностикой
         console.error('Sheets API Call FAILED (Sequential Catch):', e.message);
-        // Throw a specific error that prevents the downstream process from crashing
         throw createError(500, `Failed to fetch data from Google Sheets (API ERROR): ${e.message}`, "SHEETS_API_ERROR");
     }
 
@@ -70,7 +69,7 @@ async function readSheetData(sheets, spreadsheetId) {
     const importValues = (importRes && importRes.data && importRes.data.values) ? importRes.data.values : [];
     const controlValues = (controlRes && controlRes.data && controlRes.data.values) ? controlRes.data.values : [];
     
-    // CRITICAL CHECK: If data is unexpectedly empty, treat it as an error
+    // CRITICAL CHECK: If data is unexpectedly empty
     if (importValues.length === 0 || controlValues.length === 0) {
         throw createError(500, 'Sheets: Empty or invalid data retrieved from critical sheets (check data ranges and sheet names).', "SHEETS_DATA_EMPTY");
     }
@@ -83,7 +82,6 @@ async function readSheetData(sheets, spreadsheetId) {
     };
 }
 
-// getProductSkuMap (EXISTING)
 function getProductSkuMap(importValues, controlValues) {
     const headers = importValues[0] || [];
     const rows = importValues.slice(1);
@@ -127,7 +125,7 @@ function getFullName(nameObj) {
     };
 }
 
-// --- FUNCTION: Mapping Wix Status to Murkit Response Format ---
+// --- FUNCTION: Mapping Wix Status to Murkit Response Format (Для новых функций) ---
 function mapWixOrderToMurkitResponse(wixOrder, fulfillments, externalId) {
     const orderStatus = wixOrder.fulfillmentStatus || wixOrder.status;
     const wixShippingLine = wixOrder.shippingInfo?.title || ''; 
@@ -138,13 +136,10 @@ function mapWixOrderToMurkitResponse(wixOrder, fulfillments, externalId) {
     let shipment = null;
     let ttn = null;
 
-    // 1. Cancellation processing
     if (wixOrder.status === 'CANCELED') { 
         murkitStatus = 'canceled';
         murkitCancelStatus = 'canceled';
     } 
-    
-    // 2. Fulfillment/Shipment status determination
     else if (orderStatus === 'FULFILLED') {
         murkitStatus = 'sent';
     } 
@@ -152,26 +147,21 @@ function mapWixOrderToMurkitResponse(wixOrder, fulfillments, externalId) {
         murkitStatus = 'accepted';
     }
 
-    // 3. Process Fulfillments to get the TTN (Tracking Number)
     if (Array.isArray(fulfillments) && fulfillments.length > 0) {
         const fulfillmentWithTtn = fulfillments
-            // FIX: Search for fulfillment where trackingNumber is a non-empty string.
             .find(f => f.trackingInfo && String(f.trackingInfo.trackingNumber || '').trim().length > 0);
         
         if (fulfillmentWithTtn) {
-            // Assign the cleaned, non-empty TTN
             ttn = String(fulfillmentWithTtn.trackingInfo.trackingNumber).trim();
         }
     }
 
-    // 4. Mapping shipping method and TTN (Only if status is 'sent' AND TTN is available)
     const normalizedShippingLine = wixShippingLine.trim();
     if (murkitStatus === 'sent' && ttn) {
         shipmentType = WIX_TO_MURKIT_STATUS_MAPPING[normalizedShippingLine] || 'nova-post'; 
         shipment = { ttn: ttn };
     }
     
-    // The Murkit response ID should be the Wix ID
     return {
         id: externalId, 
         status: murkitStatus,
@@ -184,18 +174,18 @@ function mapWixOrderToMurkitResponse(wixOrder, fulfillments, externalId) {
 
 // --- MAIN HANDLER ---
 export default async function handler(req, res) {
+    // 0. Initial Auth Check
     if (!checkAuth(req)) {
         return res.status(401).json({ error: 'Unauthorized' });
     }
     
+    // FIX 1: URL cleanup
     const urlPathFull = req.url;
-    // FIX 1: Clean URL path from query parameters that Vercel might add (like ?path=...)
     const urlPath = urlPathFull.split('?')[0]; 
 
     // --- 1. PUT Cancel Order Endpoint ---
     const cancelOrderPathMatch = urlPath.match(/\/orders\/([^/]+)\/cancel$/);
     if (req.method === 'PUT' && cancelOrderPathMatch) {
-        // Wix Order ID
         const wixOrderId = cancelOrderPathMatch[1]; 
 
         try {
@@ -217,7 +207,6 @@ export default async function handler(req, res) {
             }
             
             if (cancelResult.status === 200) {
-                // Search by Wix ID
                 const wixOrder = await findWixOrderById(wixOrderId);
                 const fulfillments = await getWixOrderFulfillments(wixOrderId);
                 
@@ -225,7 +214,6 @@ export default async function handler(req, res) {
                      return res.status(500).json({ message: 'Internal server error: Order status not found after successful cancellation request', code: 'INTERNAL_ERROR' });
                 }
                 
-                // Murkit response ID should be Wix ID
                 const murkitResponse = mapWixOrderToMurkitResponse(wixOrder, fulfillments, wixOrderId);
                 return res.status(200).json(murkitResponse);
             }
@@ -236,14 +224,12 @@ export default async function handler(req, res) {
         }
     }
     
-    // --- 2. GET Order Endpoint (Get status of a single order) ---
+    // --- 2. GET Order Endpoint ---
     const singleOrderPathMatch = urlPath.match(/\/orders\/([^/]+)$/);
     if (req.method === 'GET' && singleOrderPathMatch) {
-        // Wix Order ID
         const wixOrderId = singleOrderPathMatch[1];
 
         try {
-            // Search by Wix ID
             const wixOrder = await findWixOrderById(wixOrderId);
 
             if (!wixOrder) {
@@ -252,7 +238,6 @@ export default async function handler(req, res) {
             
             const fulfillments = await getWixOrderFulfillments(wixOrderId);
 
-            // Murkit response ID should be Wix ID
             const murkitResponse = mapWixOrderToMurkitResponse(wixOrder, fulfillments, wixOrderId);
             return res.status(200).json(murkitResponse);
 
@@ -262,9 +247,9 @@ export default async function handler(req, res) {
         }
     }
 
-    // --- 3. POST Order Batch Endpoint (Get status of multiple orders) ---
+    // --- 3. POST Order Batch Endpoint ---
     if (req.method === 'POST' && urlPath.includes('/orders/batch')) {
-        let orderIds; // Wix Order IDs
+        let orderIds; 
         try {
             orderIds = req.body && req.body.orders;
             if (!Array.isArray(orderIds) || orderIds.length === 0) {
@@ -277,9 +262,9 @@ export default async function handler(req, res) {
         const responses = [];
         const errors = [];
         
+        // Simplified batch logic (no Sheets dependency here)
         await Promise.all(orderIds.map(async (wixOrderId) => {
             try {
-                // Search by Wix ID
                 const wixOrder = await findWixOrderById(wixOrderId);
 
                 if (!wixOrder) {
@@ -298,9 +283,10 @@ export default async function handler(req, res) {
         return res.status(200).json({ orders: responses, errors: errors });
     }
 
-    // --- 4. EXISTING POST LOGIC (Order Creation) ---
+    // --- 4. POST LOGIC (Order Creation - RESTORED ORIGINAL WORKING FLOW) ---
     if (req.method === 'POST') {
         
+        // Safety check for path
         if (urlPath.includes('/orders/')) {
             return res.status(404).json({ message: 'Not Found' });
         }
@@ -312,25 +298,22 @@ export default async function handler(req, res) {
             const murkitOrderId = String(murkitData.number);
             console.log(`Processing Murkit Order #${murkitOrderId}`);
 
-            // === STEP 0: DEDUPLICATION ===
-            // SEARCH HERE BY Murkit ID
+            // === КРОК 0: ДЕДУПЛІКАЦІЯ ===
             const existingOrder = await findWixOrderByExternalId(murkitOrderId);
             if (existingOrder) {
                 console.log(`Order #${murkitOrderId} already exists. ID: ${existingOrder.id}`);
-                // Return Wix ID
-                return res.status(200).json({ "id": existingOrder.id });
+                return res.status(200).json({ "id": existingOrder.number || existingOrder.id });
             }
 
-            // === ITEM VALIDATION ===
+            // === ВАЛІДАЦІЯ ТОВАРІВ ===
             const murkitItems = murkitData.items || [];
             if (murkitItems.length === 0) throw createError(400, 'No items in order');
 
             const currency = "UAH";
 
-            // 1. Sheets
-            const sheets = await ensureAuth();
-            // This call is now more robust against API response issues
-            const { importValues, controlValues } = await readSheetData(sheets, process.env.SHEETS_ID);
+            // 1. Sheets (FIXED implementation of readSheetData is used here)
+            const { sheets, spreadsheetId } = await ensureAuth(); 
+            const { importValues, controlValues } = await readSheetData(sheets, spreadsheetId);
             const codeToSkuMap = getProductSkuMap(importValues, controlValues);
             
             // 2. Resolve SKUs
@@ -349,7 +332,7 @@ export default async function handler(req, res) {
             // 3. Fetch Wix Products
             const wixProducts = await getProductsBySkus(wixSkusToFetch);
             
-            // === CREATE SKU MAP (Flattening) ===
+            // === СТВОРЕННЯ МАПИ SKU ===
             const skuMap = {};
 
             wixProducts.forEach(p => {
@@ -370,9 +353,11 @@ export default async function handler(req, res) {
 
             // 4. Line Items
             const lineItems = [];
+            const adjustments = []; 
+            
             for (const item of itemsWithSku) {
                 const requestedQty = parseInt(item.quantity || 1, 10);
-                const targetSku = normalizeSku(item.wixSku);
+                const targetSku = normalizeSku(item.wixSku); 
 
                 const match = skuMap[targetSku];
 
@@ -385,7 +370,7 @@ export default async function handler(req, res) {
 
                 let catalogItemId = foundProduct.id; 
                 let variantId = null;
-                let stockData = foundProduct.stock;
+                let stockData = foundProduct.stock; 
                 let productName = foundProduct.name;
                 
                 let variantChoices = null; 
@@ -397,18 +382,30 @@ export default async function handler(req, res) {
                     
                     if (foundVariant.choices) {
                         variantChoices = foundVariant.choices; 
-                        
                         descriptionLines = Object.entries(variantChoices).map(([k, v]) => ({
                             name: { original: k, translated: k },
                             plainText: { original: v, translated: v },
                             lineType: "PLAIN_TEXT"
                         }));
                     }
+                } 
+
+                // === ПЕРЕВІРКА СТОКУ ===
+                if (stockData.inStock === false) {
+                     throw createError(409, `Product with code ${item.code} has not enough stock`, "ITEM_NOT_AVAILABLE");
+                }
+                
+                if (stockData.trackQuantity && (stockData.quantity < requestedQty)) {
+                     throw createError(409, `Product with code ${item.code} has not enough stock`, "ITEM_NOT_AVAILABLE");
                 }
 
-                // === STOCK CHECK (409 ITEM_NOT_AVAILABLE) ===
-                if (stockData.inStock === false || (stockData.trackQuantity && (stockData.quantity < requestedQty))) {
-                     throw createError(409, `Product with code ${item.code} has not enough stock`, "ITEM_NOT_AVAILABLE");
+                // === ЗБІР ДАНИХ ДЛЯ КОРИГУВАННЯ ЗАПАСІВ ===
+                if (stockData.trackQuantity === true) {
+                    adjustments.push({
+                        productId: catalogItemId,
+                        variantId: variantId, 
+                        quantity: requestedQty
+                    });
                 }
 
                 let imageObj = null;
@@ -464,12 +461,9 @@ export default async function handler(req, res) {
                 total: { amount: fmtPrice(murkitData.sum), currency }
             };
 
-            // === DELIVERY LOGIC ===
             const d = murkitData.delivery || {}; 
-            const deliveryTypeKey = String(murkitData.deliveryType || 'nova-post').toLowerCase(); 
+            const deliveryType = String(murkitData.deliveryType || '');
             
-            const deliveryTitle = MURKIT_TO_WIX_CREATION_MAPPING[deliveryTypeKey] || "Delivery"; 
-
             const npCity = String(d.settlement || d.city || d.settlementName || '').trim();
             const street = String(d.address || '').trim();
             const house = String(d.house || '').trim();
@@ -477,33 +471,35 @@ export default async function handler(req, res) {
             const npWarehouse = String(d.warehouseNumber || '').trim();
 
             let extendedFields = {};
-            let finalAddressLine = "unknown address";
+            let finalAddressLine = "невідома адреса";
+            let deliveryTitle = "Delivery";
 
-            if (deliveryTypeKey.includes('courier')) {
-                // COURIER
+            if (deliveryType.includes('courier')) {
+                deliveryTitle = SHIPPING_TITLES.COURIER; 
+                
                 const addressParts = [];
                 if (street) addressParts.push(street);
                 if (house) addressParts.push(`буд. ${house}`);
                 if (flat) addressParts.push(`кв. ${flat}`);
                 
-                finalAddressLine = addressParts.length > 0
+                finalAddressLine = addressParts.length > 0 
                     ? addressParts.join(', ') 
-                    : `Address Delivery (${npCity})`;
+                    : `Адресна доставка (${npCity})`;
 
             } else {
-                // BRANCH/POSTAMAT (mapped in Wix as "НП Відділення")
+                deliveryTitle = SHIPPING_TITLES.BRANCH; 
+                
                 if (npWarehouse) {
-                    finalAddressLine = `Nova Poshta №${npWarehouse}`;
+                    finalAddressLine = `Нова Пошта №${npWarehouse}`;
                     extendedFields = {
                         "namespaces": {
                             "_user_fields": {
-                                // Field used for branch/postamat number
                                 "nomer_viddilennya_poshtomatu_novoyi_poshti": npWarehouse
                             }
                         }
                     };
                 } else {
-                    finalAddressLine = "Nova Poshta (number not specified)";
+                    finalAddressLine = "Нова Пошта (номер не указан)";
                 }
             }
 
@@ -516,8 +512,8 @@ export default async function handler(req, res) {
 
             const wixOrderPayload = {
                 channelInfo: {
-                    type: "OTHER_PLATFORM",
-                    externalOrderId: murkitOrderId // Store Murkit ID here
+                    type: "WEB",
+                    externalOrderId: murkitOrderId
                 },
                 status: "APPROVED",
                 lineItems: lineItems,
@@ -555,9 +551,17 @@ export default async function handler(req, res) {
 
             const createdOrder = await createWixOrder(wixOrderPayload);
             
-            // RETURN OUR ID (WIX ID)
-            return res.status(201).json({ 
-                "id": createdOrder.order?.id
+            // === ЯВНЕ СПИСАННЯ ЗАПАСІВ ===
+            if (adjustments.length > 0) {
+                try {
+                    await adjustInventory(adjustments);
+                } catch (adjErr) {
+                    console.error("Warning: Inventory adjustment failed, but order was created.", adjErr);
+                }
+            }
+
+            res.status(201).json({ 
+                "id": createdOrder.order?.number 
             });
 
         } catch (e) {
@@ -572,7 +576,7 @@ export default async function handler(req, res) {
                 });
             }
 
-            return res.status(status).json({ 
+            res.status(status).json({ 
                 error: e.message 
             });
         }
