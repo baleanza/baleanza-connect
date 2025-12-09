@@ -8,10 +8,7 @@
     { "source": "/monomarket", "destination": "/api/monomarket.js" },
     { "source": "/monomarket-offers", "destination": "/api/monomarket-offers.js" },
     { "source": "/monomarket-stock", "destination": "/api/monomarket-stock.js" },
-    { "source": "/debug-wix", "destination": "/api/debug-wix.js" },
-    { "source": "/debug-order", "destination": "/api/debug-order.js" },
     { "source": "/monomarket-endpoint", "destination": "/api/monomarket-endpoint.js" },
-    { "source": "/monomarket-endpoint/orders/:path*", "destination": "/api/monomarket-endpoint.js" },
-    { "source": "/debug-fulfillment/:wixId", "destination": "/api/debug-fulfillment.js" }
+    { "source": "/monomarket-endpoint/orders/:path*", "destination": "/api/monomarket-endpoint.js" }
 ]
 }
