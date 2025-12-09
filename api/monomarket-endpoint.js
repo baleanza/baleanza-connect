@@ -47,16 +47,25 @@ function checkAuth(req) {
 }
 
 // readSheetData (EXISTING)
-// FIX: Enhanced for robustness and parallel fetching to prevent "Cannot read properties of undefined" error.
+// FIX: Enhanced for robustness against API errors and older JS environments 
+// to prevent "Cannot read properties of undefined (reading 'values')" error.
 async function readSheetData(sheets, spreadsheetId) {
-    const [importRes, controlRes] = await Promise.all([
-        sheets.spreadsheets.values.get({ spreadsheetId, range: 'Import!A1:ZZ' }),
-        sheets.spreadsheets.values.get({ spreadsheetId, range: 'Feed Control List!A1:F' }),
-    ]);
+    let importRes, controlRes;
     
-    // Safely access data, falling back to an empty array if .data or .values is missing
-    const importValues = importRes?.data?.values || [];
-    const controlValues = controlRes?.data?.values || [];
+    try {
+        [importRes, controlRes] = await Promise.all([
+            sheets.spreadsheets.values.get({ spreadsheetId, range: 'Import!A1:ZZ' }),
+            sheets.spreadsheets.values.get({ spreadsheetId, range: 'Feed Control List!A1:F' }),
+        ]);
+    } catch (e) {
+        // If Promise.all fails, re-throw a more informative error
+        throw createError(500, `Failed to fetch data from Google Sheets: ${e.message}`, "SHEETS_API_ERROR");
+    }
+
+    // Safely access data using traditional checks (compatible with older Node.js runtimes)
+    // This prevents the "Cannot read properties of undefined" error.
+    const importValues = (importRes && importRes.data && importRes.data.values) ? importRes.data.values : [];
+    const controlValues = (controlRes && controlRes.data && controlRes.data.values) ? controlRes.data.values : [];
 
     return { 
         importValues: importValues, 
@@ -170,7 +179,7 @@ export default async function handler(req, res) {
     }
     
     const urlPathFull = req.url;
-    // FIX: Clean URL path from query parameters that Vercel might add (like ?path=...)
+    // FIX 1: Clean URL path from query parameters that Vercel might add (like ?path=...)
     const urlPath = urlPathFull.split('?')[0]; 
 
     // --- 1. PUT Cancel Order Endpoint ---
@@ -310,6 +319,7 @@ export default async function handler(req, res) {
 
             // 1. Sheets
             const sheets = await ensureAuth();
+            // This call is now more robust against API response issues
             const { importValues, controlValues } = await readSheetData(sheets, process.env.SHEETS_ID);
             const codeToSkuMap = getProductSkuMap(importValues, controlValues);
             
@@ -477,6 +487,7 @@ export default async function handler(req, res) {
                     extendedFields = {
                         "namespaces": {
                             "_user_fields": {
+                                // Field used for branch/postamat number
                                 "nomer_viddilennya_poshtomatu_novoyi_poshti": npWarehouse
                             }
                         }
