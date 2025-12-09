@@ -1,9 +1,9 @@
 import { 
     createWixOrder, 
     getProductsBySkus, 
-    // Для дедуплікації (пошук за Murkit ID)
+    // For deduplication (search by Murkit ID)
     findWixOrderByExternalId, 
-    // Для статусу/скасування (пошук за Wix ID)
+    // For status/cancellation (search by Wix ID)
     findWixOrderById, 
     getWixOrderFulfillments, 
     cancelWixOrderById
@@ -12,20 +12,20 @@ import { ensureAuth } from '../lib/sheetsClient.js';
 
 const WIX_STORES_APP_ID = "215238eb-22a5-4c36-9e7b-e7c08025e04e"; 
 
-// === МАПІНГ ДЛЯ СТВОРЕННЯ ЗАМОВЛЕННЯ (Murkit Input -> Wix Title) ===
+// === MAPPING FOR ORDER CREATION (Murkit Input -> Wix Title) ===
 const MURKIT_TO_WIX_CREATION_MAPPING = {
-    "nova-post": "НП Відділення", // Стандарт для відділень і поштоматів
+    "nova-post": "НП Відділення", // Standard for branches and postamats
     "courier-nova-post": "НП Кур'єр"
 };
 
-// === МАПІНГ ДЛЯ ОТРИМАННЯ СТАТУСУ (Wix Title -> Murkit Output) ===
+// === MAPPING FOR STATUS RETRIEVAL (Wix Title -> Murkit Output) ===
 const WIX_TO_MURKIT_STATUS_MAPPING = {
     "НП Відділення": "nova-post", 
     "НП Кур'єр": "courier-nova-post",
     "НП Поштомат": "nova-post"
 };
 
-// === ІСНУЮЧІ ХЕЛПЕРИ З ВАШОГО КОДУ ===
+// === EXISTING HELPER FUNCTIONS ===
 function createError(status, message, code = null) {
     const err = new Error(message);
     err.status = status;
@@ -46,7 +46,7 @@ function checkAuth(req) {
   return login === process.env.MURKIT_USER && password === process.env.MURKIT_PASS;
 }
 
-// readSheetData (ІСНУЮЧИЙ)
+// readSheetData (EXISTING)
 async function readSheetData(sheets, spreadsheetId) {
   const importRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Import!A1:ZZ' });
   const controlRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Feed Control List!A1:F' });
@@ -56,7 +56,7 @@ async function readSheetData(sheets, spreadsheetId) {
   };
 }
 
-// getProductSkuMap (ІСНУЮЧИЙ)
+// getProductSkuMap (EXISTING)
 function getProductSkuMap(importValues, controlValues) {
     const headers = importValues[0] || [];
     const rows = importValues.slice(1);
@@ -100,7 +100,7 @@ function getFullName(nameObj) {
     };
 }
 
-// --- ФУНКЦІЯ: Мапінг статусу Wix до формату Murkit ---
+// --- FUNCTION: Mapping Wix Status to Murkit Response Format ---
 function mapWixOrderToMurkitResponse(wixOrder, fulfillments, externalId) {
     const orderStatus = wixOrder.fulfillmentStatus || wixOrder.status;
     const wixShippingLine = wixOrder.shippingInfo?.title || ''; 
@@ -111,13 +111,13 @@ function mapWixOrderToMurkitResponse(wixOrder, fulfillments, externalId) {
     let shipment = null;
     let ttn = null;
 
-    // 1. Обробка скасування
+    // 1. Cancellation processing
     if (wixOrder.status === 'CANCELED') { 
         murkitStatus = 'canceled';
         murkitCancelStatus = 'canceled';
     } 
     
-    // 2. Визначення статусу виконання/відправлення
+    // 2. Fulfillment/Shipment status determination
     else if (orderStatus === 'FULFILLED') {
         murkitStatus = 'sent';
     } 
@@ -125,25 +125,28 @@ function mapWixOrderToMurkitResponse(wixOrder, fulfillments, externalId) {
         murkitStatus = 'accepted';
     }
 
-    // 3. Обробка Fulfillments (Відправлення) для отримання TTN
+    // 3. Process Fulfillments to get the TTN (Tracking Number)
     if (Array.isArray(fulfillments) && fulfillments.length > 0) {
         const fulfillmentWithTtn = fulfillments
-            .find(f => f.trackingInfo && f.trackingInfo.trackingNumber);
+            // FIX 2: Search for fulfillment where trackingNumber is a non-empty string.
+            .find(f => f.trackingInfo && String(f.trackingInfo.trackingNumber || '').trim().length > 0);
         
         if (fulfillmentWithTtn) {
-            ttn = fulfillmentWithTtn.trackingInfo.trackingNumber;
+            // Assign the cleaned, non-empty TTN
+            ttn = String(fulfillmentWithTtn.trackingInfo.trackingNumber).trim();
         }
     }
 
-    // 4. Мапінг способу доставки та TTN (Тільки якщо статус 'sent' і є TTN)
+    // 4. Mapping shipping method and TTN (Only if status is 'sent' AND TTN is available)
     const normalizedShippingLine = wixShippingLine.trim();
     if (murkitStatus === 'sent' && ttn) {
         shipmentType = WIX_TO_MURKIT_STATUS_MAPPING[normalizedShippingLine] || 'nova-post'; 
         shipment = { ttn: ttn };
     }
     
+    // The Murkit response ID should be the Wix ID
     return {
-        id: externalId, // Тут ми повертаємо Wix ID (який Murkit надіслав)
+        id: externalId, 
         status: murkitStatus,
         cancelStatus: murkitCancelStatus,
         shipmentType: shipmentType,
@@ -152,13 +155,15 @@ function mapWixOrderToMurkitResponse(wixOrder, fulfillments, externalId) {
 }
 
 
-// --- ОСНОВНИЙ ОБРОБНИК (Handler) ---
+// --- MAIN HANDLER ---
 export default async function handler(req, res) {
     if (!checkAuth(req)) {
         return res.status(401).json({ error: 'Unauthorized' });
     }
     
-    const urlPath = req.url;
+    const urlPathFull = req.url;
+    // FIX 1: Clean URL path from query parameters that Vercel might add (like ?path=...)
+    const urlPath = urlPathFull.split('?')[0]; 
 
     // --- 1. PUT Cancel Order Endpoint ---
     const cancelOrderPathMatch = urlPath.match(/\/orders\/([^/]+)\/cancel$/);
@@ -185,7 +190,7 @@ export default async function handler(req, res) {
             }
             
             if (cancelResult.status === 200) {
-                // Пошук за Wix ID
+                // Search by Wix ID
                 const wixOrder = await findWixOrderById(wixOrderId);
                 const fulfillments = await getWixOrderFulfillments(wixOrderId);
                 
@@ -193,7 +198,7 @@ export default async function handler(req, res) {
                      return res.status(500).json({ message: 'Internal server error: Order status not found after successful cancellation request', code: 'INTERNAL_ERROR' });
                 }
                 
-                // В Murkit response ID має бути Wix ID
+                // Murkit response ID should be Wix ID
                 const murkitResponse = mapWixOrderToMurkitResponse(wixOrder, fulfillments, wixOrderId);
                 return res.status(200).json(murkitResponse);
             }
@@ -204,14 +209,14 @@ export default async function handler(req, res) {
         }
     }
     
-    // --- 2. GET Order Endpoint (Отримання статусу одного замовлення) ---
+    // --- 2. GET Order Endpoint (Get status of a single order) ---
     const singleOrderPathMatch = urlPath.match(/\/orders\/([^/]+)$/);
     if (req.method === 'GET' && singleOrderPathMatch) {
         // Wix Order ID
         const wixOrderId = singleOrderPathMatch[1];
 
         try {
-            // Пошук за Wix ID
+            // Search by Wix ID
             const wixOrder = await findWixOrderById(wixOrderId);
 
             if (!wixOrder) {
@@ -220,7 +225,7 @@ export default async function handler(req, res) {
             
             const fulfillments = await getWixOrderFulfillments(wixOrderId);
 
-            // В Murkit response ID має бути Wix ID
+            // Murkit response ID should be Wix ID
             const murkitResponse = mapWixOrderToMurkitResponse(wixOrder, fulfillments, wixOrderId);
             return res.status(200).json(murkitResponse);
 
@@ -230,7 +235,7 @@ export default async function handler(req, res) {
         }
     }
 
-    // --- 3. POST Order Batch Endpoint (Отримання статусу кількох замовлень) ---
+    // --- 3. POST Order Batch Endpoint (Get status of multiple orders) ---
     if (req.method === 'POST' && urlPath.includes('/orders/batch')) {
         let orderIds; // Wix Order IDs
         try {
@@ -247,7 +252,7 @@ export default async function handler(req, res) {
         
         await Promise.all(orderIds.map(async (wixOrderId) => {
             try {
-                // Пошук за Wix ID
+                // Search by Wix ID
                 const wixOrder = await findWixOrderById(wixOrderId);
 
                 if (!wixOrder) {
@@ -266,7 +271,7 @@ export default async function handler(req, res) {
         return res.status(200).json({ orders: responses, errors: errors });
     }
 
-    // --- 4. ІСНУЮЧА ЛОГІКА POST (Створення замовлення) ---
+    // --- 4. EXISTING POST LOGIC (Order Creation) ---
     if (req.method === 'POST') {
         
         if (urlPath.includes('/orders/')) {
@@ -280,16 +285,16 @@ export default async function handler(req, res) {
             const murkitOrderId = String(murkitData.number);
             console.log(`Processing Murkit Order #${murkitOrderId}`);
 
-            // === КРОК 0: ДЕДУПЛІКАЦІЯ ===
-            // ТУТ ШУКАЄМО ЗА Murkit ID
+            // === STEP 0: DEDUPLICATION ===
+            // SEARCH HERE BY Murkit ID
             const existingOrder = await findWixOrderByExternalId(murkitOrderId);
             if (existingOrder) {
                 console.log(`Order #${murkitOrderId} already exists. ID: ${existingOrder.id}`);
-                // Повертаємо Wix ID
+                // Return Wix ID
                 return res.status(200).json({ "id": existingOrder.id });
             }
 
-            // === ВАЛІДАЦІЯ ТОВАРІВ ===
+            // === ITEM VALIDATION ===
             const murkitItems = murkitData.items || [];
             if (murkitItems.length === 0) throw createError(400, 'No items in order');
 
@@ -316,7 +321,7 @@ export default async function handler(req, res) {
             // 3. Fetch Wix Products
             const wixProducts = await getProductsBySkus(wixSkusToFetch);
             
-            // === СТВОРЕННЯ МАПИ SKU (Flattening) ===
+            // === CREATE SKU MAP (Flattening) ===
             const skuMap = {};
 
             wixProducts.forEach(p => {
@@ -373,7 +378,7 @@ export default async function handler(req, res) {
                     }
                 }
 
-                // === ПЕРЕВІРКА СТОКУ (409 ITEM_NOT_AVAILABLE) ===
+                // === STOCK CHECK (409 ITEM_NOT_AVAILABLE) ===
                 if (stockData.inStock === false || (stockData.trackQuantity && (stockData.quantity < requestedQty))) {
                      throw createError(409, `Product with code ${item.code} has not enough stock`, "ITEM_NOT_AVAILABLE");
                 }
@@ -431,7 +436,7 @@ export default async function handler(req, res) {
                 total: { amount: fmtPrice(murkitData.sum), currency }
             };
 
-            // === ЛОГІКА ДОСТАВКИ ===
+            // === DELIVERY LOGIC ===
             const d = murkitData.delivery || {}; 
             const deliveryTypeKey = String(murkitData.deliveryType || 'nova-post').toLowerCase(); 
             
@@ -444,10 +449,10 @@ export default async function handler(req, res) {
             const npWarehouse = String(d.warehouseNumber || '').trim();
 
             let extendedFields = {};
-            let finalAddressLine = "невідома адреса";
+            let finalAddressLine = "unknown address";
 
             if (deliveryTypeKey.includes('courier')) {
-                // КУР'ЄР
+                // COURIER
                 const addressParts = [];
                 if (street) addressParts.push(street);
                 if (house) addressParts.push(`буд. ${house}`);
@@ -455,12 +460,12 @@ export default async function handler(req, res) {
                 
                 finalAddressLine = addressParts.length > 0
                     ? addressParts.join(', ') 
-                    : `Адресна доставка (${npCity})`;
+                    : `Address Delivery (${npCity})`;
 
             } else {
-                // ВІДДІЛЕННЯ/ПОШТОМАТ (мапиться в Wix як "НП Відділення")
+                // BRANCH/POSTAMAT (mapped in Wix as "НП Відділення")
                 if (npWarehouse) {
-                    finalAddressLine = `Нова Пошта №${npWarehouse}`;
+                    finalAddressLine = `Nova Poshta №${npWarehouse}`;
                     extendedFields = {
                         "namespaces": {
                             "_user_fields": {
@@ -469,7 +474,7 @@ export default async function handler(req, res) {
                         }
                     };
                 } else {
-                    finalAddressLine = "Нова Пошта (номер не указан)";
+                    finalAddressLine = "Nova Poshta (number not specified)";
                 }
             }
 
@@ -483,7 +488,7 @@ export default async function handler(req, res) {
             const wixOrderPayload = {
                 channelInfo: {
                     type: "OTHER_PLATFORM",
-                    externalOrderId: murkitOrderId // Зберігаємо Murkit ID тут
+                    externalOrderId: murkitOrderId // Store Murkit ID here
                 },
                 status: "APPROVED",
                 lineItems: lineItems,
@@ -521,7 +526,7 @@ export default async function handler(req, res) {
 
             const createdOrder = await createWixOrder(wixOrderPayload);
             
-            // ПОВЕРТАЄМО НАШ ID (WIX ID)
+            // RETURN OUR ID (WIX ID)
             return res.status(201).json({ 
                 "id": createdOrder.order?.id
             });
@@ -544,6 +549,6 @@ export default async function handler(req, res) {
         }
     }
 
-    // 5. Обробка невідомих маршрутів/методів
+    // 5. Handling unknown routes/methods
     return res.status(404).json({ message: 'Not Found' });
 }
