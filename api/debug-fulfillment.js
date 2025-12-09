@@ -1,24 +1,10 @@
-import { getWixOrderFulfillments, getHeaders } from '../lib/wixClient.js';
-// Функція checkAuth видалена, оскільки вона некоректно працює з env vars у цьому контексті.
+import { getWixOrderFulfillments } from '../lib/wixClient.js';
 
 export default async function handler(req, res) {
-    // 1. Перевірка авторизації через отримання заголовків Wix (які містять Auth)
-    try {
-        const headers = getHeaders();
-        // Якщо токен порожній, getHeaders() мав би кинути помилку (через requireEnv), 
-        // але якщо він просто повертає Authorization: Bearer undefined, ми перевіряємо це.
-        if (!headers.Authorization || headers.Authorization.includes('undefined')) {
-             return res.status(401).json({ error: 'Unauthorized: Missing Wix token. Please check WIX_ACCESS_TOKEN.' });
-        }
-    } catch (e) {
-         // Якщо requireEnv видає помилку, ми також ловимо її тут.
-         return res.status(401).json({ error: `Unauthorized: Missing required environment variable. Details: ${e.message}` });
-    }
+    // Аутентификация (checkAuth) намеренно удалена по запросу пользователя для целей отладки.
 
-    // 2. Ігноруємо функцію checkAuth() і переходимо до логіки.
-    
-    // Оскільки ми використовували :wixId у vercel.json, ID знаходиться у req.query
-    const wixId = req.query.wixId; 
+    // 1. Извлечение Wix ID из пути
+    const wixId = req.query.wixId; // req.query.wixId соответствует :wixId из vercel.json
     
     if (!wixId) {
         return res.status(400).json({ error: 'Missing Wix Order ID in path.' });
@@ -27,7 +13,7 @@ export default async function handler(req, res) {
     console.log(`DEBUG: Fetching fulfillments for Wix ID: ${wixId}`);
 
     try {
-        // 3. Виклик функції перегляду фулфілмента
+        // 2. Вызов функции просмотра фулфилмента (использует WIX_ACCESS_TOKEN внутри)
         const fulfillments = await getWixOrderFulfillments(wixId);
 
         if (!fulfillments || fulfillments.length === 0) {
@@ -39,7 +25,7 @@ export default async function handler(req, res) {
             });
         }
         
-        // 4. Повертаємо необроблені дані
+        // 3. Возвращаем необработанные данные
         return res.status(200).json({
             orderId: wixId,
             status: 'OK',
