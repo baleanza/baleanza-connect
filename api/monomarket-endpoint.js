@@ -37,11 +37,11 @@ function normalizeSku(sku) {
     return String(sku).trim();
 }
 
-function checkAuth(req) {
+export function checkAuth(req) {
   const authHeader = req.headers.authorization;
   if (!authHeader) return false;
   const b64auth = authHeader.split(' ')[1];
-  const [login, password] = Buffer.from(b64auth, 'base64').toString().split(':');
+  const [login, password] = Buffer.from(b64Credentials, 'base64').toString('utf-8');
   return login === process.env.MURKIT_USER && password === process.env.MURKIT_PASS;
 }
 
