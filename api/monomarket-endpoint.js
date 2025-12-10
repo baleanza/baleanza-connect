@@ -46,6 +46,19 @@ export function checkAuth(req) {
   return login === process.env.MURKIT_USER && password === process.env.MURKIT_PASS;
 }
 
+export function checkAuth(req) {
+  // lower case 
+  const API_KEY_HEADER = 'x-monomarket-token'; 
+  const EXPECTED_KEY = process.env.MURKIT_API_KEY; 
+  if (!EXPECTED_KEY) {
+      console.error("MURKIT_API_KEY environment variable is not set.");
+      return false; 
+  }
+  const providedKey = req.headers[API_KEY_HEADER];
+  return providedKey === EXPECTED_KEY;
+}
+
+
 // readSheetData (FINAL FIX: Uses ONLY sequential reading with enhanced checks)
 async function readSheetData(sheets, spreadsheetId) {
     let importRes, controlRes;
