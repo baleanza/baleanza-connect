@@ -15,14 +15,15 @@ const WIX_STORES_APP_ID = "215238eb-22a5-4c36-9e7b-e7c08025e04e";
 // === SHIPPING TITLE CONFIGURATION (for order creation) ===
 const SHIPPING_TITLES = {
     BRANCH: "НП Відділення",  
-    COURIER: "НП Кур'єр"
+    COURIER: "НП Кур'єр",
+    POSTOMAT: "НП Поштомат"
 };
 
 // === MAPPING FOR STATUS RETRIEVAL (for status fetching) ===
 const WIX_TO_MURKIT_STATUS_MAPPING = {
     "НП Відділення": "nova-post", 
     "НП Кур'єр": "courier-nova-post",
-    "НП Поштомат": "nova-post"
+    "НП Поштомат": "nova-post:postomat"
 };
 
 function createError(status, message, code = null) {
