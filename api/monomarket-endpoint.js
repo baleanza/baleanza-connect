@@ -8,10 +8,9 @@ import {
     adjustInventory,
     getWixOrderFulfillmentsBatch,
     updateWixOrderDetails,
-    getWixOrderTransactions, 
-    createWixRefund,
     addExternalPayment,
-    createExternalRefund // Импортируем нашу новую функцию
+    getWixPaymentDetails, // Новая функция
+    voidWixPayment        // Новая функция
 } from '../lib/wixClient.js';
 import { ensureAuth } from '../lib/sheetsClient.js'; 
 
@@ -121,8 +120,6 @@ function mapWixOrderToMurkitResponse(wixOrder, fulfillments, externalId) {
     let shipment = null;
     let ttn = null;
 
-    // В ответе batch fulfillment может быть разная структура
-    // (массив ordersWithFulfillments уже обработан, тут мы получаем массив самих fulfillments для одного заказа)
     if (Array.isArray(fulfillments) && fulfillments.length > 0) {
         const fulfillmentWithTtn = fulfillments
             .find(f => f.trackingInfo && String(f.trackingInfo.trackingNumber || '').trim().length > 0);
@@ -193,42 +190,33 @@ export default async function handler(req, res) {
             if (isSent) {
                 // FULFILLED LOGIC
                 try {
-                    await updateWixOrderDetails(wixOrderId, {
-                         buyerNote: "⚠️ КЛІЄНТ ПОПРОСИВ ПОВЕРНЕННЯ / REFUND"
-                    });
-                    
-                    console.log(`[DEBUG] Fetching transactions for order: ${wixOrderId}`);
-                    const transactions = await getWixOrderTransactions(wixOrderId);
-                    console.log(`[DEBUG] Transactions found:`, transactions.length);
+                    console.log(`[DEBUG] Fetching payment details for order: ${wixOrderId} (ecom/v1)`);
+                    const payment = await getWixPaymentDetails(wixOrderId);
 
-                    const totalAmount = currentWixOrder.priceSummary?.total?.amount || "0";
-                    const currency = currentWixOrder.priceSummary?.total?.currency || "UAH";
+                    if (payment && payment.id) {
+                        console.log(`[DEBUG] Payment found: ${payment.id}. Status: ${payment.status}`);
+                        
+                        // Если статус уже не APPROVE, то, возможно, не надо ничего делать
+                        // Но мы попробуем VOID
+                        await voidWixPayment(payment.id, wixOrderId);
 
-                    let paymentIdToRefund = null;
-                    if (transactions && transactions.length > 0) {
-                         const tx = transactions.find(t => 
-                            t.type === 'ORDER_PAID' || 
-                            (t.amount && parseFloat(t.amount.amount) > 0)
-                         );
-                         if (tx) paymentIdToRefund = tx.id; 
-                    }
-                    
-                    if (paymentIdToRefund) {
-                        // Если нашли транзакцию - создаем Refund через нее (createExternalRefund тоже подойдет)
-                        await createExternalRefund(wixOrderId, totalAmount, currency);
-                        console.log(`Order ${wixOrderId} FULFILLED. Refund transaction created.`);
+                        // Также обновляем заметку
+                        await updateWixOrderDetails(wixOrderId, {
+                             buyerNote: "⚠️ КЛІЄНТ ПОПРОСИВ ПОВЕРНЕННЯ / VOID PAYMENT"
+                        });
+                        console.log(`Order ${wixOrderId} FULFILLED. Payment VOIDED.`);
                     } else {
-                         // Если не нашли - принудительно создаем минус-транзакцию
-                         console.warn(`[DEBUG] No payment transaction found. Forcing REFUND transaction creation.`);
-                         await createExternalRefund(wixOrderId, totalAmount, currency);
-                         console.log(`Order ${wixOrderId} FULFILLED. Forced refund transaction created.`);
+                         console.warn(`[DEBUG] No payment info found in ecom/v1. Cannot VOID.`);
+                         await updateWixOrderDetails(wixOrderId, {
+                             buyerNote: "⚠️ REFUND REQUIRED (AUTO-VOID FAILED: NO PAYMENT FOUND)"
+                        });
                     }
 
                 } catch (updateError) {
-                    console.error(`Wix refund logic failed for ${wixOrderId}:`, updateError.message);
+                    console.error(`Wix void/refund logic failed for ${wixOrderId}:`, updateError.message);
                 }
 
-                // Получаем TTN через Batch
+                // Получаем TTN
                 const batchResponse = await getWixOrderFulfillmentsBatch([wixOrderId]);
                 const orderFulf = batchResponse.find(o => o.orderId === wixOrderId);
                 fulfillments = orderFulf ? orderFulf.fulfillments : [];
@@ -253,13 +241,11 @@ export default async function handler(req, res) {
                 
                 if (cancelResult.status === 200) {
                     const wixOrder = await findWixOrderById(wixOrderId);
-                    
                     const batchResponse = await getWixOrderFulfillmentsBatch([wixOrderId]);
                     const orderFulf = batchResponse.find(o => o.orderId === wixOrderId);
                     fulfillments = orderFulf ? orderFulf.fulfillments : [];
 
                     murkitResponse = mapWixOrderToMurkitResponse(wixOrder, fulfillments, wixOrderId);
-                    
                     murkitResponse.status = 'canceled';
                     murkitResponse.cancelStatus = 'canceled';
                     
@@ -274,6 +260,8 @@ export default async function handler(req, res) {
         }
     }
 
+    // ... Остальной код GET/POST/POST ...
+    // ... Оставляем без изменений ...
     // --- 2. GET Order Endpoint ---
     const singleOrderPathMatch = urlPath.match(/\/orders\/([^/]+)$/);
     if (req.method === 'GET' && singleOrderPathMatch) {
