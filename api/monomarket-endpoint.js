@@ -316,7 +316,7 @@ export default async function handler(req, res) {
             const murkitData = req.body;
             if (!murkitData.number) throw createError(400, 'Missing order number');
             const murkitOrderId = String(murkitData.number);
-            const cartNumber = murkitData.cartNumber ? String(murkitData.cartNumber) : null; // <--- Беремо cartNumber
+            const cartNumber = murkitData.cartNumber ? String(murkitData.cartNumber) : null; 
             console.log(`Processing Murkit Order #${murkitOrderId}, Cart #${cartNumber}`);
 
             const existingOrder = await findWixOrderByExternalId(murkitOrderId);
@@ -428,11 +428,9 @@ export default async function handler(req, res) {
             const clientPhone = String(murkitData.client?.phone || "").replace(/\D/g,''); 
             const recipientPhone = String(murkitData.recipient?.phone || murkitData.client?.phone || "").replace(/\D/g,'');
             
-            // --- ЛОГИКА EMAIL (Fake Email, если нет) ---
+            // --- ЛОГИКА EMAIL ---
             let email = murkitData.client?.email;
             if (!email || !email.includes('@')) {
-                // Если email нет, создаем уникальный на основе телефона.
-                // Используем recipientPhone (телефон получателя) как самый надежный идентификатор.
                 const phoneForId = clientPhone || recipientPhone || "0000000000";
                 email = `client.${phoneForId}@no-email.monomarket.com`;
                 console.log(`Generated fake email for client: ${email}`);
@@ -477,11 +475,11 @@ export default async function handler(req, res) {
 
             const shippingAddress = { country: "UA", city: npCity || "City", addressLine: finalAddressLine, postalCode: "00000" };
 
-            // --- Подготовка Custom Fields (CartNumber) ---
+            // --- Custom Fields (Renamed to Monobank Cart ID) ---
             const customFields = [];
             if (cartNumber) {
                 customFields.push({
-                    title: "Murkit Cart ID",
+                    title: "Monobank Cart ID", // <--- Переименовано
                     value: cartNumber
                 });
             }
@@ -501,21 +499,22 @@ export default async function handler(req, res) {
                     cost: { price: { amount: "0.00", currency } }
                 },
                 buyerInfo: { email: email },
-                // paymentStatus не ставим, чтобы заказ был UNPAID
+                // НЕ ставим paymentStatus, заказ создается UNPAID
                 currency: currency,
                 weightUnit: "KG",
                 taxIncludedInPrices: false,
                 ...(Object.keys(extendedFields).length > 0 ? { extendedFields } : {}),
-                ...(customFields.length > 0 ? { customFields } : {}) // <--- Додаємо Custom Fields
+                ...(customFields.length > 0 ? { customFields } : {}) 
             };
 
-            // 1. Створюємо замовлення
+            // 1. Создаем UNPAID заказ
             const createdOrder = await createWixOrder(wixOrderPayload);
             const newOrderId = createdOrder.order?.id;
 
-            // 2. ОДРАЗУ додаємо оплату (це створює Transaction ID і переводить в PAID)
+            // 2. Добавляем транзакцию (Она автоматически переведет статус в PAID)
             if (newOrderId) {
                 try {
+                    // Используем fmtPrice чтобы сумма была точно "123.00"
                     await addExternalPayment(newOrderId, fmtPrice(murkitData.sum), currency, murkitData.date);
                 } catch (payErr) {
                     console.error(`Warning: Failed to add payment to order ${newOrderId}`, payErr);
