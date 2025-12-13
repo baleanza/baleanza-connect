@@ -3,7 +3,7 @@ import {
     getProductsBySkus, 
     findWixOrderByExternalId, 
     findWixOrderById, 
-    getWixOrderFulfillments, 
+    getWixOrderFulfillments, // Оставляем импорт, но не используем в критичных местах
     cancelWixOrderById,
     adjustInventory,
     getWixOrderFulfillmentsBatch,
@@ -188,7 +188,11 @@ export default async function handler(req, res) {
             // 1. ПРОВЕРКА: ЗАКАЗ УЖЕ ОТМЕНЕН?
             if (currentWixOrder.status === 'CANCELED') {
                 // Если Wix уже отменил заказ, возвращаем финальный статус отмены.
-                fulfillments = await getWixOrderFulfillments(wixOrderId); 
+                // Используем BATCH для надежности
+                const batchResponse = await getWixOrderFulfillmentsBatch([wixOrderId]);
+                const orderFulfillmentData = batchResponse[0];
+                fulfillments = (orderFulfillmentData && orderFulfillmentData.fulfillments) ? orderFulfillmentData.fulfillments : [];
+                
                 murkitResponse = mapWixOrderToMurkitResponse(currentWixOrder, fulfillments, wixOrderId);
                 
                 // Убеждаемся, что Murkit видит финальный canceled
@@ -211,8 +215,13 @@ export default async function handler(req, res) {
                     let paymentIdToRefund = null;
                     
                     if (transactions && transactions.length > 0) {
-                         const tx = transactions.find(t => t.regularPaymentDetails);
-                         if (tx) paymentIdToRefund = tx.id; // Используем ID транзакции для refund
+                         // [FIX] Более надежный поиск транзакции (ищем любую оплаченную)
+                         const tx = transactions.find(t => 
+                            t.regularPaymentDetails || 
+                            t.type === 'ORDER_PAID' || 
+                            (t.amount && parseFloat(t.amount.amount) > 0)
+                         );
+                         if (tx) paymentIdToRefund = tx.id; 
                     }
                     
                     if (paymentIdToRefund) {
@@ -230,7 +239,10 @@ export default async function handler(req, res) {
                 }
 
                 // Формируем ответ для Murkit: статус SENT, отмена CANCELING, с TTN
-                fulfillments = await getWixOrderFulfillments(wixOrderId); 
+                // [FIX] Используем Batch-запрос вместо обычного get, чтобы точно получить TTN
+                const batchResponse = await getWixOrderFulfillmentsBatch([wixOrderId]);
+                const orderFulfillmentData = batchResponse[0];
+                fulfillments = (orderFulfillmentData && orderFulfillmentData.fulfillments) ? orderFulfillmentData.fulfillments : [];
                 
                 // Получаем все данные (TTN, shipmentType)
                 const mappedResponse = mapWixOrderToMurkitResponse(currentWixOrder, fulfillments, wixOrderId);
@@ -238,8 +250,6 @@ export default async function handler(req, res) {
                 // Присваиваем нужные статусы для "процесс возврата начат"
                 mappedResponse.status = 'sent';
                 mappedResponse.cancelStatus = 'canceling';
-                
-                // shipment/shipmentType должны быть заполнены функцией mapWixOrderToMurkitResponse
                 
                 return res.status(200).json(mappedResponse);
                 
@@ -258,7 +268,11 @@ export default async function handler(req, res) {
                 if (cancelResult.status === 200) {
                     // Успешная отмена в Wix. Возвращаем финальный canceled.
                     const wixOrder = await findWixOrderById(wixOrderId);
-                    fulfillments = await getWixOrderFulfillments(wixOrderId); 
+                    // [FIX] Тоже используем BATCH для надежности
+                    const batchResponse = await getWixOrderFulfillmentsBatch([wixOrderId]);
+                    const orderFulfillmentData = batchResponse[0];
+                    fulfillments = (orderFulfillmentData && orderFulfillmentData.fulfillments) ? orderFulfillmentData.fulfillments : [];
+
                     murkitResponse = mapWixOrderToMurkitResponse(wixOrder, fulfillments, wixOrderId);
                     
                     murkitResponse.status = 'canceled';
