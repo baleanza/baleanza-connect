@@ -488,7 +488,12 @@ export default async function handler(req, res) {
             // 5. Order Data Preparation
             const clientName = getFullName(murkitData.client?.name);
             const recipientName = getFullName(murkitData.recipient?.name);
-            const phone = String(murkitData.client?.phone || murkitData.recipient?.phone || "").replace(/\D/g,'');
+            
+            // FIX: Separate phone numbers for client (billing) and recipient (shipping)
+            const clientPhone = String(murkitData.client?.phone || "").replace(/\D/g,''); 
+            // Fallback to client phone if recipient phone is missing, but prioritize recipient phone
+            const recipientPhone = String(murkitData.recipient?.phone || murkitData.client?.phone || "").replace(/\D/g,'');
+
             const email = murkitData.client?.email || "monomarket@mywoodmood.com";
 
             const priceSummary = {
@@ -577,7 +582,7 @@ export default async function handler(req, res) {
                     contactDetails: {
                         firstName: clientName.firstName,
                         lastName: clientName.lastName,
-                        phone: phone,
+                        phone: clientPhone, // FIX: Use clientPhone
                         email: email
                     }
                 },
@@ -589,14 +594,14 @@ export default async function handler(req, res) {
                             contactDetails: {
                                 firstName: recipientName.firstName,
                                 lastName: recipientName.lastName,
-                                phone: phone
+                                phone: recipientPhone // FIX: Use recipientPhone
                             }
                         }
                     },
                     cost: { price: { amount: "0.00", currency } }
                 },
                 buyerInfo: { email: email },
-                paymentStatus: (murkitData.payment_status === 'paid' || String(murkitData.paymentType || '').includes('paid')) ? "PAID" : "NOT_PAID",
+                paymentStatus: "PAID", // FIX: Set paymentStatus to PAID unconditionally as requested
                 currency: currency,
                 weightUnit: "KG",
                 taxIncludedInPrices: false,
