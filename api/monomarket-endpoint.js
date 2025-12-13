@@ -3,7 +3,7 @@ import {
     getProductsBySkus, 
     findWixOrderByExternalId, 
     findWixOrderById, 
-    getWixOrderFulfillments, // Оставляем импорт, но не используем в критичных местах
+    getWixOrderFulfillments, 
     cancelWixOrderById,
     adjustInventory,
     getWixOrderFulfillmentsBatch,
@@ -188,14 +188,11 @@ export default async function handler(req, res) {
             // 1. ПРОВЕРКА: ЗАКАЗ УЖЕ ОТМЕНЕН?
             if (currentWixOrder.status === 'CANCELED') {
                 // Если Wix уже отменил заказ, возвращаем финальный статус отмены.
-                // Используем BATCH для надежности
                 const batchResponse = await getWixOrderFulfillmentsBatch([wixOrderId]);
                 const orderFulfillmentData = batchResponse[0];
                 fulfillments = (orderFulfillmentData && orderFulfillmentData.fulfillments) ? orderFulfillmentData.fulfillments : [];
                 
                 murkitResponse = mapWixOrderToMurkitResponse(currentWixOrder, fulfillments, wixOrderId);
-                
-                // Убеждаемся, что Murkit видит финальный canceled
                 murkitResponse.status = 'canceled';
                 murkitResponse.cancelStatus = 'canceled';
 
@@ -215,9 +212,9 @@ export default async function handler(req, res) {
                     let paymentIdToRefund = null;
                     
                     if (transactions && transactions.length > 0) {
-                         // [FIX] Более надежный поиск транзакции (ищем любую оплаченную)
+                         // === [FIX] УНИВЕРСАЛЬНЫЙ ПОИСК ТРАНЗАКЦИИ ===
+                         // Ищем любую транзакцию, которая является оплатой (ORDER_PAID) или имеет сумму > 0
                          const tx = transactions.find(t => 
-                            t.regularPaymentDetails || 
                             t.type === 'ORDER_PAID' || 
                             (t.amount && parseFloat(t.amount.amount) > 0)
                          );
@@ -232,6 +229,7 @@ export default async function handler(req, res) {
                         console.log(`Order ${wixOrderId} FULFILLED. Payment status set to REFUNDED.`);
                     } else {
                          console.warn(`No payment transaction found for order ${wixOrderId}. Skipping refund.`);
+                         // Даже если не нашли транзакцию, мы все равно вернем "canceling", так как логика Murkit этого требует
                     }
 
                 } catch (updateError) {
@@ -239,15 +237,12 @@ export default async function handler(req, res) {
                 }
 
                 // Формируем ответ для Murkit: статус SENT, отмена CANCELING, с TTN
-                // [FIX] Используем Batch-запрос вместо обычного get, чтобы точно получить TTN
                 const batchResponse = await getWixOrderFulfillmentsBatch([wixOrderId]);
                 const orderFulfillmentData = batchResponse[0];
                 fulfillments = (orderFulfillmentData && orderFulfillmentData.fulfillments) ? orderFulfillmentData.fulfillments : [];
                 
-                // Получаем все данные (TTN, shipmentType)
                 const mappedResponse = mapWixOrderToMurkitResponse(currentWixOrder, fulfillments, wixOrderId);
                 
-                // Присваиваем нужные статусы для "процесс возврата начат"
                 mappedResponse.status = 'sent';
                 mappedResponse.cancelStatus = 'canceling';
                 
@@ -266,9 +261,7 @@ export default async function handler(req, res) {
                 }
                 
                 if (cancelResult.status === 200) {
-                    // Успешная отмена в Wix. Возвращаем финальный canceled.
                     const wixOrder = await findWixOrderById(wixOrderId);
-                    // [FIX] Тоже используем BATCH для надежности
                     const batchResponse = await getWixOrderFulfillmentsBatch([wixOrderId]);
                     const orderFulfillmentData = batchResponse[0];
                     fulfillments = (orderFulfillmentData && orderFulfillmentData.fulfillments) ? orderFulfillmentData.fulfillments : [];
@@ -301,10 +294,8 @@ export default async function handler(req, res) {
             const orderFulfillmentData = batchResponse[0];
             const fulfillments = (orderFulfillmentData && orderFulfillmentData.fulfillments) ? orderFulfillmentData.fulfillments : [];
 
-            // В этом блоке просто возвращаем текущий статус, включая TTN если FULFILLED
             const murkitResponse = mapWixOrderToMurkitResponse(wixOrder, fulfillments, wixOrderId);
             
-            // Если заказ отменен в Wix, то возвращаем final canceled
             if (wixOrder.status === 'CANCELED') {
                  murkitResponse.status = 'canceled';
                  murkitResponse.cancelStatus = 'canceled';
@@ -358,7 +349,6 @@ export default async function handler(req, res) {
             const fulfillmentsForOrder = batchFulfillmentMap.get(result.id) || [];
             const murkitResponse = mapWixOrderToMurkitResponse(result.order, fulfillmentsForOrder, result.id);
             
-            // Если заказ отменен в Wix, то возвращаем final canceled
             if (result.order.status === 'CANCELED') {
                  murkitResponse.status = 'canceled';
                  murkitResponse.cancelStatus = 'canceled';
@@ -561,7 +551,6 @@ export default async function handler(req, res) {
                     cost: { price: { amount: "0.00", currency } }
                 },
                 buyerInfo: { email: email },
-                // paymentStatus не ставим, чтобы заказ был UNPAID (ждем добавления транзакции)
                 currency: currency,
                 weightUnit: "KG",
                 taxIncludedInPrices: false,
@@ -569,11 +558,9 @@ export default async function handler(req, res) {
                 ...(customFields.length > 0 ? { customFields } : {}) 
             };
 
-            // 1. Создаем UNPAID заказ
             const createdOrder = await createWixOrder(wixOrderPayload);
             const newOrderId = createdOrder.order?.id;
 
-            // 2. Добавляем транзакцию (Используем СУММУ ИЗ ОТВЕТА WIX)
             if (newOrderId && createdOrder.order?.priceSummary?.total?.amount) {
                 const wixTotalAmount = createdOrder.order.priceSummary.total.amount;
                 try {
@@ -587,7 +574,6 @@ export default async function handler(req, res) {
                 try { await adjustInventory(adjustments); } catch (adjErr) { console.error("Warning: Inventory adjustment failed", adjErr); }
             }
 
-            // --- ФИНАЛЬНЫЙ RETURN ---
             return res.status(201).json({ "id": newOrderId }); 
 
         } catch (e) {
