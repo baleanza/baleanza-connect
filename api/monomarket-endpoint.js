@@ -10,7 +10,7 @@ import {
     updateWixOrderDetails,
     getWixOrderTransactions, 
     createWixRefund,
-    addExternalPayment // <--- НОВА ФУНКЦІЯ
+    addExternalPayment 
 } from '../lib/wixClient.js';
 import { ensureAuth } from '../lib/sheetsClient.js'; 
 
@@ -183,19 +183,16 @@ export default async function handler(req, res) {
 
             if (isSent) {
                 // Case 1: Заказ уже отправлен (FULFILLED).
-                
                 try {
-                    // 1. Оновлюємо Примітку (Backup indicator)
                     await updateWixOrderDetails(wixOrderId, {
                          buyerNote: "⚠️ КЛІЄНТ ПОПРОСИВ ПОВЕРНЕННЯ / REFUND"
                     });
                     
-                    // 2. Спроба знайти транзакцію і зробити REFUND
                     const transactions = await getWixOrderTransactions(wixOrderId);
                     let paymentIdToRefund = null;
                     
                     if (transactions && transactions.length > 0) {
-                         // Шукаємо будь-яку транзакцію з ID
+                         // Шукаем транзакцию для возврата (обычно type: CHARGE или OFFLINE)
                          const tx = transactions.find(t => t.paymentId || t._id);
                          if (tx) paymentIdToRefund = tx.paymentId || tx._id;
                     }
@@ -204,7 +201,6 @@ export default async function handler(req, res) {
                         const totalAmount = currentWixOrder.priceSummary?.total?.amount || "0";
                         const currency = currentWixOrder.priceSummary?.total?.currency || "UAH";
                         
-                        // Робимо повернення
                         await createWixRefund(wixOrderId, paymentIdToRefund, totalAmount, currency);
                         console.log(`Order ${wixOrderId} FULFILLED. Payment status set to REFUNDED.`);
                     } else {
@@ -229,7 +225,6 @@ export default async function handler(req, res) {
                     let message = 'Cannot cancel order';
                     if (cancelResult.code === 'ORDER_ALREADY_CANCELED') message = 'Order already canceled';
                     else if (cancelResult.code === 'CANNOT_CANCEL_ORDER') message = 'Order already completed'; 
-                    
                     return res.status(409).json({ message: message, code: cancelResult.code });
                 }
                 
@@ -313,7 +308,7 @@ export default async function handler(req, res) {
         return res.status(200).json({ orders: responses, errors: errors });
     }
 
-    // --- 4. POST LOGIC (Order Creation - REVISED FOR REFUNDABILITY) ---
+    // --- 4. POST LOGIC (Order Creation) ---
     if (req.method === 'POST') {
         if (urlPath.includes('/orders/')) return res.status(404).json({ message: 'Not Found' });
 
@@ -321,7 +316,8 @@ export default async function handler(req, res) {
             const murkitData = req.body;
             if (!murkitData.number) throw createError(400, 'Missing order number');
             const murkitOrderId = String(murkitData.number);
-            console.log(`Processing Murkit Order #${murkitOrderId}`);
+            const cartNumber = murkitData.cartNumber ? String(murkitData.cartNumber) : null; // <--- Беремо cartNumber
+            console.log(`Processing Murkit Order #${murkitOrderId}, Cart #${cartNumber}`);
 
             const existingOrder = await findWixOrderByExternalId(murkitOrderId);
             if (existingOrder) {
@@ -431,7 +427,16 @@ export default async function handler(req, res) {
             const recipientName = getFullName(murkitData.recipient?.name);
             const clientPhone = String(murkitData.client?.phone || "").replace(/\D/g,''); 
             const recipientPhone = String(murkitData.recipient?.phone || murkitData.client?.phone || "").replace(/\D/g,'');
-            const email = murkitData.client?.email || "monomarket@mywoodmood.com";
+            
+            // --- ЛОГИКА EMAIL (Fake Email, если нет) ---
+            let email = murkitData.client?.email;
+            if (!email || !email.includes('@')) {
+                // Если email нет, создаем уникальный на основе телефона.
+                // Используем recipientPhone (телефон получателя) как самый надежный идентификатор.
+                const phoneForId = clientPhone || recipientPhone || "0000000000";
+                email = `client.${phoneForId}@no-email.monomarket.com`;
+                console.log(`Generated fake email for client: ${email}`);
+            }
 
             const priceSummary = {
                 subtotal: { amount: fmtPrice(murkitData.sum), currency },
@@ -472,6 +477,15 @@ export default async function handler(req, res) {
 
             const shippingAddress = { country: "UA", city: npCity || "City", addressLine: finalAddressLine, postalCode: "00000" };
 
+            // --- Подготовка Custom Fields (CartNumber) ---
+            const customFields = [];
+            if (cartNumber) {
+                customFields.push({
+                    title: "Murkit Cart ID",
+                    value: cartNumber
+                });
+            }
+
             const wixOrderPayload = {
                 channelInfo: { type: "WEB", externalOrderId: murkitOrderId },
                 status: "APPROVED",
@@ -487,22 +501,22 @@ export default async function handler(req, res) {
                     cost: { price: { amount: "0.00", currency } }
                 },
                 buyerInfo: { email: email },
-                // !!! ЗМІНА: НЕ СТАВИМО "PAID" ТУТ. Залишаємо UNPAID.
-                // paymentStatus: "PAID", 
+                // paymentStatus не ставим, чтобы заказ был UNPAID
                 currency: currency,
                 weightUnit: "KG",
                 taxIncludedInPrices: false,
-                ...(Object.keys(extendedFields).length > 0 ? { extendedFields } : {})
+                ...(Object.keys(extendedFields).length > 0 ? { extendedFields } : {}),
+                ...(customFields.length > 0 ? { customFields } : {}) // <--- Додаємо Custom Fields
             };
 
-            // 1. Створюємо замовлення (Воно буде UNPAID)
+            // 1. Створюємо замовлення
             const createdOrder = await createWixOrder(wixOrderPayload);
             const newOrderId = createdOrder.order?.id;
 
-            // 2. ОДРАЗУ додаємо оплату (це створює Transaction ID)
+            // 2. ОДРАЗУ додаємо оплату (це створює Transaction ID і переводить в PAID)
             if (newOrderId) {
                 try {
-                    await addExternalPayment(newOrderId, fmtPrice(murkitData.sum), currency);
+                    await addExternalPayment(newOrderId, fmtPrice(murkitData.sum), currency, murkitData.date);
                 } catch (payErr) {
                     console.error(`Warning: Failed to add payment to order ${newOrderId}`, payErr);
                 }
