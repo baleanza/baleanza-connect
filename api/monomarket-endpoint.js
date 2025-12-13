@@ -8,25 +8,15 @@ import {
     adjustInventory,
     getWixOrderFulfillmentsBatch,
     updateWixOrderDetails,
-    createWixRefund, // Используем штатный Refund
+    addExternalRefundTransaction, // <-- ИСПОЛЬЗУЕМ НОВУЮ ФУНКЦИЮ
     addExternalPayment,
-    getWixPaymentDetails // Используем для поиска ID
+    // getWixPaymentDetails, createWixRefund больше не нужны для этой логики
 } from '../lib/wixClient.js';
 import { ensureAuth } from '../lib/sheetsClient.js'; 
 
 const WIX_STORES_APP_ID = "215238eb-22a5-4c36-9e7b-e7c08025e04e"; 
 
-const SHIPPING_TITLES = {
-    BRANCH: "НП Відділення",  
-    COURIER: "НП Кур'єр",
-    POSTOMAT: "НП Поштомат"
-};
-
-const WIX_TO_MURKIT_STATUS_MAPPING = {
-    "НП Відділення": "nova-post", 
-    "НП Кур'єр": "courier-nova-post",
-    "НП Поштомат": "nova-post:postomat"
-};
+// ... (Остальной вспомогательный код остается без изменений)
 
 function createError(status, message, code = null) {
     const err = new Error(message);
@@ -109,6 +99,18 @@ function getFullName(nameObj) {
         lastName: String(nameObj.last || nameObj.lastName || "")
     };
 }
+
+const SHIPPING_TITLES = {
+    BRANCH: "НП Відділення",  
+    COURIER: "НП Кур'єр",
+    POSTOMAT: "НП Поштомат"
+};
+
+const WIX_TO_MURKIT_STATUS_MAPPING = {
+    "НП Відділення": "nova-post", 
+    "НП Кур'єр": "courier-nova-post",
+    "НП Поштомат": "nova-post:postomat"
+};
 
 function mapWixOrderToMurkitResponse(wixOrder, fulfillments, externalId) {
     const orderStatus = wixOrder.fulfillmentStatus || wixOrder.status;
@@ -194,40 +196,30 @@ export default async function handler(req, res) {
                     const currency = currentWixOrder.priceSummary?.total?.currency || "UAH";
                     let refundSuccess = false;
 
-                    // 1. Ищем ID оплаты
-                    console.log(`[DEBUG] Attempting to find payment details for order: ${wixOrderId}`);
-                    const payment = await getWixPaymentDetails(wixOrderId);
-                    
-                    if (payment && payment.id) {
-                        const paymentId = payment.id;
-                        const paymentStatus = payment.regularPaymentDetails?.status || 'UNKNOWN';
-                        console.log(`[DEBUG] Payment found: ${paymentId}. Status: ${paymentStatus}. Attempting Refund.`);
-                        
-                        // 2. Делаем штатный Refund
-                        const refundResult = await createWixRefund(wixOrderId, paymentId, totalAmount, currency);
+                    // 1. Делаем Refund путем добавления отрицательной транзакции (Add Payment Endpoint)
+                    console.log(`[DEBUG] Attempting to add REFUND transaction for order: ${wixOrderId}`);
+                    const refundResult = await addExternalRefundTransaction(wixOrderId, totalAmount, currency);
 
-                        if (refundResult) {
-                           refundSuccess = true;
-                           console.log(`Order ${wixOrderId} FULFILLED. Payment status set to REFUNDED.`);
-                           
-                           await updateWixOrderDetails(wixOrderId, {
-                                buyerNote: "⚠️ КЛІЄНТ ПОПРОСИВ ПОВЕРНЕННЯ / REFUND SUCCESS"
-                           });
-                        }
-
+                    if (refundResult) {
+                       refundSuccess = true;
+                       console.log(`Order ${wixOrderId} FULFILLED. Refund transaction added.`);
+                       
+                       await updateWixOrderDetails(wixOrderId, {
+                            buyerNote: "⚠️ КЛІЄНТ ПОПРОСИВ ПОВЕРНЕННЯ / REFUND SUCCESS (Transaction Added)"
+                       });
                     } 
                     
                     if (!refundSuccess) {
-                         // Мы здесь, если Payment ID не найден, или Refund API вернул ошибку/null
-                         console.warn(`[DEBUG] Payment or Refund failed for order ${wixOrderId}. Skipping refund and logging note.`);
+                         // Мы здесь, если API вернул ошибку/null
+                         console.warn(`[DEBUG] REFUND transaction failed for order ${wixOrderId}. Skipping refund and logging note.`);
                          await updateWixOrderDetails(wixOrderId, {
-                              buyerNote: "⚠️ REFUND REQUIRED (AUTO-REFUND FAILED: NO PAYMENT ID or API ERROR)"
+                              buyerNote: "⚠️ REFUND REQUIRED (AUTO-REFUND FAILED: Transaction API Error)"
                          });
                     }
 
                 } catch (updateError) {
-                    // Если сам процесс Refund (API вызов) выдал исключение
-                    console.error(`Wix refund logic failed for ${wixOrderId}:`, updateError.message);
+                    // Если сам процесс выдал исключение
+                    console.error(`Wix refund logic crashed for ${wixOrderId}:`, updateError.message);
                     await updateWixOrderDetails(wixOrderId, {
                          buyerNote: `⚠️ REFUND REQUIRED (AUTO-REFUND CRASHED: ${updateError.message})`
                     });
@@ -277,7 +269,9 @@ export default async function handler(req, res) {
             return res.status(status).json({ message: 'Internal server error while processing cancellation request', code: 'INTERNAL_ERROR' });
         }
     }
-
+    
+    // ... (Остальной код)
+    
     // --- 2. GET Order Endpoint ---
     const singleOrderPathMatch = urlPath.match(/\/orders\/([^/]+)$/);
     if (req.method === 'GET' && singleOrderPathMatch) {
