@@ -10,7 +10,8 @@ import {
     updateWixOrderDetails,
     getWixOrderTransactions, 
     createWixRefund,
-    addExternalPayment 
+    addExternalPayment,
+    createExternalRefund 
 } from '../lib/wixClient.js';
 import { ensureAuth } from '../lib/sheetsClient.js'; 
 
@@ -194,14 +195,16 @@ export default async function handler(req, res) {
                          buyerNote: "⚠️ КЛІЄНТ ПОПРОСИВ ПОВЕРНЕННЯ / REFUND"
                     });
                     
-                    // === START DEBUG ===
                     console.log(`[DEBUG] Fetching transactions for order: ${wixOrderId}`);
+                    // Это вызовет улучшенный POST поиск
                     const transactions = await getWixOrderTransactions(wixOrderId);
-                    console.log(`[DEBUG] Raw transactions:`, JSON.stringify(transactions, null, 2)); 
-                    // === END DEBUG ===
+                    console.log(`[DEBUG] Transactions found:`, transactions.length);
 
+                    const totalAmount = currentWixOrder.priceSummary?.total?.amount || "0";
+                    const currency = currentWixOrder.priceSummary?.total?.currency || "UAH";
+
+                    // Пробуем найти существующую транзакцию
                     let paymentIdToRefund = null;
-                    
                     if (transactions && transactions.length > 0) {
                          const tx = transactions.find(t => 
                             t.type === 'ORDER_PAID' || 
@@ -211,13 +214,14 @@ export default async function handler(req, res) {
                     }
                     
                     if (paymentIdToRefund) {
-                        const totalAmount = currentWixOrder.priceSummary?.total?.amount || "0";
-                        const currency = currentWixOrder.priceSummary?.total?.currency || "UAH";
-                        
-                        await createWixRefund(wixOrderId, paymentIdToRefund, totalAmount, currency);
-                        console.log(`Order ${wixOrderId} FULFILLED. Payment status set to REFUNDED.`);
+                        // Если нашли - отлично, используем её (хотя createExternalRefund создает новую, но логически мы "возвращаем" эту)
+                        await createExternalRefund(wixOrderId, totalAmount, currency);
+                        console.log(`Order ${wixOrderId} FULFILLED. Refund transaction created (matched existing payment).`);
                     } else {
-                         console.warn(`[DEBUG] No payment transaction found for order ${wixOrderId}. Skipping refund.`);
+                         // Если не нашли - принудительно создаем минусовую транзакцию
+                         console.warn(`[DEBUG] No payment transaction found. Forcing REFUND transaction creation.`);
+                         await createExternalRefund(wixOrderId, totalAmount, currency);
+                         console.log(`Order ${wixOrderId} FULFILLED. Forced refund transaction created.`);
                     }
 
                 } catch (updateError) {
@@ -236,7 +240,7 @@ export default async function handler(req, res) {
                 return res.status(200).json(mappedResponse);
                 
             } else {
-                // NOT FULFILLED LOGIC
+                // NOT FULFILLED LOGIC (Стандартная отмена)
                 const cancelResult = await cancelWixOrderById(wixOrderId);
 
                 if (cancelResult.status === 409) {
