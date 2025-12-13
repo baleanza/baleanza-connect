@@ -475,11 +475,11 @@ export default async function handler(req, res) {
 
             const shippingAddress = { country: "UA", city: npCity || "City", addressLine: finalAddressLine, postalCode: "00000" };
 
-            // --- Custom Fields (Renamed to Monobank Cart ID) ---
+            // --- Custom Fields ---
             const customFields = [];
             if (cartNumber) {
                 customFields.push({
-                    title: "Monobank Cart ID", // <--- Переименовано
+                    title: "Monobank Cart ID", 
                     value: cartNumber
                 });
             }
@@ -499,7 +499,7 @@ export default async function handler(req, res) {
                     cost: { price: { amount: "0.00", currency } }
                 },
                 buyerInfo: { email: email },
-                // НЕ ставим paymentStatus, заказ создается UNPAID
+                // paymentStatus не ставим, чтобы заказ был UNPAID (ждем добавления транзакции)
                 currency: currency,
                 weightUnit: "KG",
                 taxIncludedInPrices: false,
@@ -511,11 +511,12 @@ export default async function handler(req, res) {
             const createdOrder = await createWixOrder(wixOrderPayload);
             const newOrderId = createdOrder.order?.id;
 
-            // 2. Добавляем транзакцию (Она автоматически переведет статус в PAID)
-            if (newOrderId) {
+            // 2. Добавляем транзакцию (Используем СУММУ ИЗ ОТВЕТА WIX)
+            if (newOrderId && createdOrder.order?.priceSummary?.total?.amount) {
+                const wixTotalAmount = createdOrder.order.priceSummary.total.amount;
                 try {
-                    // Используем fmtPrice чтобы сумма была точно "123.00"
-                    await addExternalPayment(newOrderId, fmtPrice(murkitData.sum), currency, murkitData.date);
+                    // Используем сумму от Wix, чтобы она совпала 1 в 1
+                    await addExternalPayment(newOrderId, wixTotalAmount, currency, murkitData.date);
                 } catch (payErr) {
                     console.error(`Warning: Failed to add payment to order ${newOrderId}`, payErr);
                 }
