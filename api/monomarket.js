@@ -1,10 +1,10 @@
 import { ensureAuth, cleanPrice } from '../lib/sheetsClient.js'; 
-// Оновлено: імпортуємо обидві функції пошуку
+// Імпортуємо обидві функції пошуку
 import { getInventoryBySkus, findWixOrderById, findWixOrderByExternalId } from '../lib/wixClient.js'; 
 // Assuming checkAuth is defined in monomarket-endpoint.js and exported/available
 import { checkAuth } from './monomarket-endpoint.js'; 
 
-// Нова допоміжна функція для перевірки формату UUID
+// Допоміжна функція для перевірки формату UUID
 function isWixUuid(id) {
     // Базовий регулярний вираз для перевірки формату UUID
     return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id.trim());
@@ -119,6 +119,9 @@ export default async function handler(req, res) {
             }
 
             // Отримуємо всі три ідентифікатори. Фоллбек на 'N/A'
+            // NOTE: Якщо findWixOrderById використовується для UUID, він повертає об'єкт order
+            // Якщо findWixOrderByExternalId використовується, він повертає перший елемент масиву orders
+            // Забезпечуємо, що ми завжди маємо необхідні поля.
             const externalId = wixOrder.channelInfo?.externalOrderId || 'N/A'; // Murkit Number
             const wixOrderNumber = wixOrder.number || 'N/A'; // Human-Readable Wix Order Number
             const wixOrderId = wixOrder.id; // Wix Order ID (UUID)
@@ -481,20 +484,18 @@ export default async function handler(req, res) {
                         let debugText;
                         
                         if (url) {
-                            // If we have a valid URL, no debug text needed
                             debugText = ''; 
                         } else if (rawContent === '') {
-                            // Content is empty
-                            debugText = \`ПУСТО: ${mappedHeader}\`;
+                            // FIXED: Використовуємо конкатенацію
+                            debugText = 'ПУСТО: ' + mappedHeader;
                         } else if (rawContent.length > 20) {
-                            // Content is long, but not an image URL (e.g., formula result)
-                            debugText = \`КОНТЕНТ (${rawContent.substring(0, 10)}...)\`;
+                            // FIXED: Використовуємо конкатенацію
+                            debugText = 'КОНТЕНТ (' + rawContent.substring(0, 10) + '...)';
                         } else {
-                            // Short content (e.g., 'CellImage' or error text)
                             debugText = rawContent;
                         }
 
-                        // Використовуємо конкатенацію для уникнення проблем із шаблонними літералами
+                        // Використовуємо конкатенацію
                         return (
                             '<td class="img-cell" title="Фото ' + (index + 1) + ' | Header: ' + mappedHeader + ' | Raw: ' + rawContent + '">' +
                             (url 
