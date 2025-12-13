@@ -10,6 +10,7 @@
     { "source": "/monomarket-stock", "destination": "/api/monomarket-stock.js" },
     { "source": "/monomarket-endpoint", "destination": "/api/monomarket-endpoint.js" },
     { "source": "/monomarket-endpoint/", "destination": "/api/monomarket-endpoint.js" },
-    { "source": "/monomarket-endpoint/orders/:path*", "destination": "/api/monomarket-endpoint.js" }
-]
+    { "source": "/monomarket-endpoint/orders/:path*", "destination": "/api/monomarket-endpoint.js" },
+    { "source": "/debug-payment", "destination": "/api/debug-payment.js" }
+  ]
 }
