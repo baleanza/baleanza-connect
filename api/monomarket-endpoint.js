@@ -191,43 +191,74 @@ export default async function handler(req, res) {
         const wixOrderId = cancelOrderPathMatch[1]; 
 
         try {
-            // NOTE: cancelWixOrderById now automatically includes "restockAllItems": true
-            const cancelResult = await cancelWixOrderById(wixOrderId);
-
-            if (cancelResult.status === 404) {
+            // 1. Fetch current order state
+            const currentWixOrder = await findWixOrderById(wixOrderId);
+            if (!currentWixOrder) {
                  return res.status(404).json({ message: 'Order does not exist', code: 'NOT_FOUND' });
             }
-            if (cancelResult.status === 409) {
-                let message;
-                if (cancelResult.code === 'ORDER_ALREADY_CANCELED') {
-                    message = 'Order already canceled';
-                } else if (cancelResult.code === 'CANNOT_CANCEL_ORDER') {
-                    message = 'Order already completed';
-                } else {
-                    message = 'Cannot cancel order';
-                }
-                 return res.status(409).json({ message: message, code: cancelResult.code });
-            }
             
-            if (cancelResult.status === 200) {
-                const wixOrder = await findWixOrderById(wixOrderId);
-                // Use single GET for cancel check (not performance critical here)
-                const fulfillments = await getWixOrderFulfillments(wixOrderId); 
+            // Проверяем, отгружен ли заказ (есть ли статус FULFILLED)
+            const isSent = currentWixOrder.fulfillmentStatus === 'FULFILLED';
+            
+            let murkitResponse;
+            let fulfillments;
+
+            if (isSent) {
+                // Case 1: Заказ уже отправлен (FULFILLED). Возвращаем 'canceling' статус Murkit.
                 
-                if (!wixOrder) {
-                     return res.status(500).json({ message: 'Internal server error: Order status not found after successful cancellation request', code: 'INTERNAL_ERROR' });
+                // Fetch fulfillments to correctly construct the 'sent' part of the response
+                fulfillments = await getWixOrderFulfillments(wixOrderId); 
+                
+                // Generate the standard response for a 'sent' order
+                murkitResponse = mapWixOrderToMurkitResponse(currentWixOrder, fulfillments, wixOrderId);
+                
+                // OVERRIDE: Устанавливаем промежуточный статус отмены 'canceling'
+                murkitResponse.cancelStatus = 'canceling';
+                
+                console.log(`Order ${wixOrderId} is FULFILLED, returning cancelStatus: 'canceling' to Murkit.`);
+
+                return res.status(200).json(murkitResponse);
+                
+            } else {
+                // Case 2: Заказ НЕ отправлен. Продолжаем обычную отмену через Wix API.
+                
+                const cancelResult = await cancelWixOrderById(wixOrderId);
+
+                if (cancelResult.status === 409) {
+                    // Handle Wix errors (already canceled, cannot cancel)
+                    let message;
+                    if (cancelResult.code === 'ORDER_ALREADY_CANCELED') {
+                        message = 'Order already canceled';
+                    } else if (cancelResult.code === 'CANNOT_CANCEL_ORDER') {
+                        message = 'Order already completed'; 
+                    } else {
+                        message = 'Cannot cancel order';
+                    }
+                    return res.status(409).json({ message: message, code: cancelResult.code });
                 }
                 
-                const murkitResponse = mapWixOrderToMurkitResponse(wixOrder, fulfillments, wixOrderId);
-                return res.status(200).json(murkitResponse);
+                if (cancelResult.status === 200) {
+                    // Successful cancellation in Wix. Return final 'canceled' to Murkit.
+                    const wixOrder = await findWixOrderById(wixOrderId);
+                    fulfillments = await getWixOrderFulfillments(wixOrderId); 
+                    
+                    if (!wixOrder) { 
+                        return res.status(500).json({ message: 'Internal server error: Order status not found after successful cancellation request', code: 'INTERNAL_ERROR' });
+                    }
+                    
+                    murkitResponse = mapWixOrderToMurkitResponse(wixOrder, fulfillments, wixOrderId);
+                    return res.status(200).json(murkitResponse);
+                }
+                
             }
 
         } catch (error) {
             console.error('PUT Cancel Order Error:', error);
-            return res.status(500).json({ message: 'Internal server error while processing cancellation request', code: 'INTERNAL_ERROR' });
+            const status = error.status || 500; 
+            return res.status(status).json({ message: 'Internal server error while processing cancellation request', code: 'INTERNAL_ERROR' });
         }
     }
-    
+
     // --- 2. GET Order Endpoint (FINAL FIX: Uses Batch for reliability) ---
     const singleOrderPathMatch = urlPath.match(/\/orders\/([^/]+)$/);
     if (req.method === 'GET' && singleOrderPathMatch) {
