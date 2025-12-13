@@ -379,9 +379,12 @@ export default async function handler(req, res) {
                             
                             const data = await res.json();
                             
-                            // 2. Correctly find the number in the structure {"order": {"number": "..."}}
-                            if (data.order && data.order.number) {
-                                resultSpan.textContent = "Номер замовлення: " + data.order.number;
+                            // 2. Display both Wix ID and Murkit number (MODIFIED LOGIC)
+                            if (data.wix_id && data.murkit_number) {
+                                resultSpan.innerHTML = \`
+                                    Wix ID: <strong>\${data.wix_id}</strong><br>
+                                    Зовнішній номер (Murkit): <strong>\${data.murkit_number}</strong>
+                                \`;
                                 resultSpan.className = "lookup-result res-success";
                             } else if (data.error) {
                                 resultSpan.textContent = "Помилка: " + data.error;
@@ -460,23 +463,23 @@ export default async function handler(req, res) {
                             debugText = ''; 
                         } else if (rawContent === '') {
                             // Content is empty
-                            debugText = `ПУСТО: ${mappedHeader}`;
+                            debugText = \`ПУСТО: \${mappedHeader}\`;
                         } else if (rawContent.length > 20) {
                             // Content is long, but not an image URL (e.g., formula result)
-                            debugText = `КОНТЕНТ (${rawContent.substring(0, 10)}...)`;
+                            debugText = \`КОНТЕНТ (\${rawContent.substring(0, 10)}...)\`;
                         } else {
                             // Short content (e.g., 'CellImage' or error text)
                             debugText = rawContent;
                         }
 
-                        return `
-                            <td class="img-cell" title="Фото ${index + 1} | Header: ${mappedHeader} | Raw: ${rawContent}">
-                                ${url 
-                                    ? `<img src="${url}" alt="Фото ${index + 1}" loading="lazy">` 
-                                    : `<span class="img-placeholder">${debugText}</span>`
+                        return \`
+                            <td class="img-cell" title="Фото \${index + 1} | Header: \${mappedHeader} | Raw: \${rawContent}">
+                                \${url 
+                                    ? \`<img src="\${url}" alt="Фото \${index + 1}" loading="lazy">\` 
+                                    : \`<span class="img-placeholder">\${debugText}</span>\`
                                 }
                             </td>
-                        `;
+                        \`;
                     }).join('')}
                     <td>${item.sku}</td>
                     <td>${item.name}</td>
